@@ -1,0 +1,60 @@
+title: "C++20 Coroutines: From Syntax to Safe Types"
+tagline: "A practical, correctness-focused C++ coroutine tutorial"
+description: >-
+  Learn C++20 coroutines from first principles: co_await, co_yield,
+  promise_type, coroutine frames, custom awaitables, task composition,
+  cancellation, ownership, and production safety.
+
+# Public GitHub Pages origin and project-site path.
+url: "https://engg-rehman.github.io"
+baseurl: "/cpp-coroutines-tutorial"
+repository: "engg-rehman/cpp-coroutines-tutorial"
+github_username: "engg-rehman"
+
+lang: en
+locale: en_US
+timezone: Asia/Kolkata
+
+theme: jekyll-theme-cayman
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+
+plugins:
+  - jekyll-seo-tag
+  - jekyll-sitemap
+  - jekyll-relative-links
+
+relative_links:
+  enabled: true
+  collections: true
+
+keywords:
+  - C++20 coroutines
+  - C++ coroutine tutorial
+  - co_await
+  - co_yield
+  - promise_type
+  - coroutine_handle
+  - C++ asynchronous programming
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+exclude:
+  - build
+  - build-asan
+  - build-debug
+  - README.md
+  - CMakeLists.txt
+  - Gemfile
+  - Gemfile.lock
+  - PUBLISHING.md
+
+webmaster_verifications:
+  google: ""
+  bing: ""

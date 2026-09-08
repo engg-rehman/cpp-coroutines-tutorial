@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="{{ page.lang | default: site.lang | default: 'en' }}">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#155799">
+    <meta name="robots" content="{{ page.robots | default: 'index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1' }}">
+    {% assign seo_keywords = page.keywords | default: site.keywords %}
+    {% if seo_keywords %}<meta name="keywords" content="{{ seo_keywords | join: ', ' | escape }}">{% endif %}
+    {% seo %}
+    <link rel="sitemap" type="application/xml" title="Sitemap" href="{{ '/sitemap.xml' | relative_url }}">
+    <link rel="stylesheet" href="{{ '/assets/css/style.css?v=' | append: site.github.build_revision | relative_url }}">
+    <style>
+      .tutorial-nav { margin-top: 1rem; }
+      .tutorial-nav a { display: inline-block; margin: .25rem .35rem; }
+      .main-content { max-width: 64rem; }
+      .site-footer { margin-top: 3rem; }
+      code { overflow-wrap: anywhere; }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Skip to content</a>
+    <header class="page-header" role="banner">
+      <h1 class="project-name">{{ site.title }}</h1>
+      <p class="project-tagline">{{ site.tagline }}</p>
+      <nav class="tutorial-nav" aria-label="Tutorial navigation">
+        <a class="btn" href="{{ '/' | relative_url }}">Home</a>
+        <a class="btn" href="{{ '/00_ROADMAP.html' | relative_url }}">Roadmap</a>
+        {% if site.github.repository_url %}<a class="btn" href="{{ site.github.repository_url }}">View on GitHub</a>{% endif %}
+      </nav>
+    </header>
+    <main id="content" class="main-content" role="main">
+      {{ content }}
+      <footer class="site-footer">
+        <span>Educational C++20 coroutine material. Verify library-specific behavior against its documentation.</span>
+      </footer>
+    </main>
+  </body>
+</html>

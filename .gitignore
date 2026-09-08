@@ -1,0 +1,6 @@
+build/
+build-*/
+manual_task
+_site/
+.jekyll-cache/
+.sass-cache/
