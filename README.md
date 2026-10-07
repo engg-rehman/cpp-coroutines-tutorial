@@ -1,75 +1,63 @@
-# C++20 Coroutines: From Syntax to Safe Types
+# C++20 Coroutines: Learn by Building
 
-This tutorial explains the C++20 coroutine language machinery and then builds small, owning coroutine types. It deliberately separates three ideas that are often blurred together:
+Start with a function containing only `co_return`. Compile it. Read the error. Add the missing piece and compile again. Keep following that cycle until you can build a generator, an event loop, composable tasks, and a small file-processing application.
 
-- a **coroutine** is a compiler-transformed function;
-- an **awaiter** defines one suspension operation;
-- a **runtime** or executor decides when and where suspended work resumes.
+All 12 lessons follow a practical sequence: **write → predict → compile/run → explain the observation → change one thing → repeat**. Compiler errors are part of the course. So are programs that compile but do not start, do not resume their parent, or expose a wrong lifetime assumption.
 
-C++20 supplies the first two mechanisms. It does **not** supply a standard `task<T>`, event loop, timer, or async-I/O runtime.
+## Begin here
 
-## Learning path
+You need ordinary C++ experience with classes, RAII, references, moves, templates, and exceptions. You do not need prior coroutine knowledge. Use a compiler and standard library supporting C++20 `<coroutine>`. Python 3 runs the optional checkpoint verifier; CMake provides a combined build and check workflow.
 
-1. [What are coroutines?](01_what_are_coroutines.md)
-2. [Why coroutines?](02_why_coroutines.md)
-3. [Lifecycle](03_coroutine_lifecycle.md)
-4. [Coroutine frame and lifetime](04_coroutine_frame.md)
-5. [Suspension and resumption](05_suspension_resumption.md)
-6. [`co_await` mechanics](06_coawait_mechanics.md)
-7. [`co_yield` and generators](07_coyield_generators.md)
-8. [Creating awaitables](08_creating_awaitables.md)
-9. [Creating a `task<T>`](09_creating_coroutine_types.md)
-10. [Handles and ownership](10_coroutine_handle.md)
-11. [Exceptions and cancellation](11_exception_handling.md)
-12. [Practical patterns](12_practical_patterns.md)
-
-Read the lessons in order through Lesson 6. After that, Lessons 7–12 can be read according to your use case.
-
-## Build the checked examples
-
-The complete examples in [`examples/`](examples/) are compiled as part of one CMake project:
+Run commands from the repository root:
 
 ```bash
-cmake -S . -B build
-cmake --build build
-ctest --test-dir build --output-on-failure
+mkdir -p scratch
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/01/01_void.cpp -o scratch/hello
 ```
 
-Or compile one directly:
+**This first command is supposed to fail.** Open [Lesson 1](01_what_are_coroutines.md) and fix the program one requirement at a time. Compiler wording and the order of simultaneous diagnostics can differ.
+
+Keep your work in `scratch/`, which Git ignores. `labs/01` through `labs/12` contain saved checkpoints for recovery and comparison. Lessons say whether a checkpoint should fail compilation, print a surprising result, or demonstrate a repair. Unsafe lifetime examples are labelled and are never executed by the verifier.
+
+## The twelve lessons
+
+1. [Make `co_return` compile](01_what_are_coroutines.md)
+2. [Pause, resume, and retain local state](02_why_coroutines.md)
+3. [Trace creation and cleanup](03_coroutine_lifecycle.md)
+4. [Repair lifetime assumptions](04_coroutine_frame.md)
+5. [Build an awaiter](05_suspension_resumption.md)
+6. [Adapt an awaitable](06_coawait_mechanics.md)
+7. [Pull values from a generator](07_coyield_generators.md)
+8. [Arrange the next resume](08_creating_awaitables.md)
+9. [Compose result-bearing tasks](09_creating_coroutine_types.md)
+10. [Repair queued-handle ownership](10_coroutine_handle.md)
+11. [Handle errors and cancellation](11_exception_handling.md)
+12. [Build a bounded reading report](12_practical_patterns.md)
+
+Work through them in order: later lessons reuse the types you built earlier. The [roadmap and coverage map](00_ROADMAP.md) connects each concept to its experiment, including the deeper lifetime, allocation, cancellation, and execution-context details.
+
+## Check your progress
 
 ```bash
-clang++ -std=c++20 -Wall -Wextra -Wpedantic examples/manual_task.cpp -o manual_task
+python3 tools/check_labs.py 01
+python3 tools/check_labs.py
+python3 tools/check_labs.py --sanitize
 ```
 
-Code labelled **pseudocode** is explanatory and is not intended to compile. Short fragments may depend on types introduced immediately above them. The files in `examples/` are the runnable reference implementations.
+The checker verifies compiler rejection for intentionally invalid files and exact output/exit status for runnable checkpoints. It matches diagnostic concepts rather than compiler-specific full messages. `--cxx g++` selects another compiler; `CXX` is also supported. Sanitizer mode requires compiler/platform support for AddressSanitizer and UndefinedBehaviorSanitizer. It checks the runnable programs, not the deliberately unsafe fragments discussed in the prose.
 
-## Non-negotiable safety rules
+To build the final application and the original compact reference examples, then check all lessons:
 
-1. A `std::coroutine_handle` is non-owning. Decide exactly who calls `destroy()`.
-2. Never resume a null handle, a running coroutine, or a coroutine at final suspend.
-3. Never destroy a running coroutine; `destroy()` requires suspension.
-4. If `final_suspend()` does not suspend, any returned handle becomes dangling when the coroutine finishes.
-5. By-reference parameters, including the implicit `this` pointer, can dangle while a coroutine is suspended.
-6. Publishing a handle from `await_suspend()` may allow another thread to resume and destroy the coroutine before `await_suspend()` returns. Do not access the awaiter or frame after publication without synchronization.
-7. Destroying an owner while a scheduler, callback, or OS operation still holds its handle is a use-after-free bug.
+```bash
+cmake -S . -B build-workshop
+cmake --build build-workshop
+ctest --test-dir build-workshop --output-on-failure
+./build-workshop/workshop_report labs/12/readings.txt 2
+```
 
-## Quick reference
+The final application reads a real file, limits outstanding records, validates input, and collects results and cancellation. Its service wait is simulated with a single-thread queue; the file reads are synchronous. Each primitive's assumptions are stated where it is built.
 
-| Term | Meaning |
-|---|---|
-| coroutine frame/state | compiler-managed storage for promise, parameter copies, live locals, awaiters, and bookkeeping |
-| promise object | per-coroutine customization object selected through `std::coroutine_traits` |
-| coroutine return object | the ordinary object returned by `promise.get_return_object()` |
-| awaitable | operand accepted by `co_await`, possibly after `await_transform` |
-| awaiter | object with `await_ready`, `await_suspend`, and `await_resume` |
-| handle | small, copyable, non-owning reference to a coroutine state |
-| continuation | coroutine to resume when another coroutine completes |
-
-## Scope
-
-The tutorial targets C++20 and notes later-library facilities only when useful. Production code should normally use a mature coroutine library rather than inventing a task type for each application. The implementations here are educational: they make ownership and control transfer visible, but intentionally omit production concerns such as allocator integration, cancellation propagation, tracing, multi-await protection, and scheduler affinity.
-
-See [CORRECTNESS_AUDIT.md](CORRECTNESS_AUDIT.md) for the audit findings and the changes made.
+The original [`examples/`](examples/) programs remain compact supplementary references. The learning path uses [`labs/`](labs/README.md), whose implementation evolves between lessons. The educational types are not a production coroutine runtime.
 
 ## AI Assistance Disclosure
 

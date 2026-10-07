@@ -1,6 +1,6 @@
 ---
-title: "std::coroutine_handle and Safe Coroutine Ownership"
-description: "Understand typed and erased coroutine handles, resume and destroy preconditions, unique ownership, self-destruction, continuations, and abandonment."
+title: "Lesson 10: Repair Ownership at the Ready Queue"
+description: "Distinguish handles from owners, move a coroutine owner, and unregister queued resumptions before frame destruction."
 keywords:
   - std::coroutine_handle
   - C++ coroutine ownership
@@ -11,153 +11,134 @@ seo:
   type: TechArticle
 ---
 
-# Lesson 10: `std::coroutine_handle` and Ownership
+# Lesson 10: Destroy a job without leaving a stale resume behind
 
-## A handle is a non-owning capability
+The event loop stores raw handles. The task owns frames. Those facts are individually simple, but together they create a lifetime requirement. We will make owner destruction remove a pending queue entry.
 
-`std::coroutine_handle<Promise>` refers to a coroutine state and can:
+## 1. Let the compiler stop a second owner
 
-- resume it;
-- destroy it;
-- test whether it is at final suspend;
-- access its promise when the handle is typed;
-- expose an opaque address for low-level interoperation.
-
-Copying a handle copies only that capability. It does not copy the coroutine, increment a reference count, or extend state lifetime.
-
-## Typed and erased handles
-
-```cpp
-using typed = std::coroutine_handle<my_promise>;
-
-typed h = /* ... */;
-std::coroutine_handle<> erased = h;
-
-my_promise& promise = h.promise(); // typed only
-erased.resume();                   // type-erased control is still possible
+```bash
+mkdir -p scratch
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/10/01_copy_owner.cpp -o scratch/ownership
 ```
 
-A typed handle knows how to expose the promise. An erased handle is useful in scheduler queues that need only resume operations.
+[01_copy_owner.cpp](labs/10/01_copy_owner.cpp) attempts `auto second = first;`. Expected: use of a deleted copy constructor.
 
-The internal representation is implementation-defined. Treat `address()` as an opaque identity suitable for round-tripping with `from_address()` only under a proven protocol. It is not portably a pointer to the promise or the first byte of a known frame struct.
+Replace that line with `auto second = std::move(first);` in a local copy. The move constructor transfers the handle and clears `first`. One destructor now owns the destroy operation. A raw `coroutine_handle`, however, remains freely copyable. It copies a capability, not a frame or a reference count.
 
-## Handle construction
+## 2. Copy the handle and move the owner
 
-Promise code commonly uses:
+Build [02_handles.cpp](labs/10/02_handles.cpp):
 
-```cpp
-handle_type::from_promise(*this)
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/10/02_handles.cpp -o scratch/ownership
+./scratch/ownership
 ```
 
-Low-level systems may use:
-
-```cpp
-void* address = handle.address();
-auto erased = std::coroutine_handle<>::from_address(address);
-```
-
-An address remains usable only while the referred coroutine state exists. Converting arbitrary pointers or stale addresses into handles does not validate them.
-
-`std::noop_coroutine()` returns a special handle that is always safe to resume and does nothing. It is useful as a continuation sentinel.
-
-## Preconditions matter
-
-For an ordinary handle `h`:
-
-```cpp
-if (h && !h.done()) {
-    h.resume();
-}
-```
-
-This check is appropriate only when external synchronization already guarantees that `h` refers to a suspended live coroutine. It does not make concurrent access safe.
-
-Key rules:
-
-- a default/null handle cannot be resumed, destroyed, queried with `done()`, or used for promise access;
-- `resume()` requires suspension and forbids final suspend;
-- `destroy()` requires suspension;
-- `done()` is intended for a suspended coroutine and reports final suspension;
-- `promise()` requires a typed handle referring to a live coroutine;
-- no two agents may race to resume/destroy the same state.
-
-Checking `!h.done()` cannot detect a dangling handle. Dereferencing a stale capability is already invalid.
-
-## Ownership model 1: unique RAII owner
-
-The examples use a move-only wrapper:
-
-```cpp
-~task() {
-    if (handle_) {
-        handle_.destroy();
-    }
-}
-```
-
-This pairs naturally with a final suspend that retains the completed state. Scheduler queues and continuations hold non-owning copies, so the system must prevent the owner from destroying while any can still resume.
-
-Move construction must clear the source:
-
-```cpp
-task(task&& other) noexcept
-    : handle_(std::exchange(other.handle_, {})) {}
-```
-
-A defaulted move would merely copy the handle and create two apparent owners.
-
-## Ownership model 2: self-destroying coroutine
-
-A fire-and-forget coroutine may use `final_suspend = suspend_never`, allowing completion to destroy its own state. Such a type must not leave an owning wrapper or external observer with a handle that it later touches.
-
-This model also needs an exception policy—often logging followed by termination or controlled reporting—and a shutdown policy for operations still suspended before final completion.
-
-Self-destruction is a specialized design, not a shortcut for avoiding RAII.
-
-## Ownership model 3: separately owned operation state
-
-Some async libraries keep result, cancellation, and continuation data in a reference-counted operation state. The coroutine frame may still have unique ownership, while callbacks retain the separate state. Completion and cancellation jointly decide when the handle may be resumed or destroyed.
-
-Do not infer that a `shared_ptr` to operation state automatically owns the coroutine frame. That relationship must be explicit.
-
-## Abandonment
-
-Destroying a suspended, incomplete coroutine abandons it. Local destructors run, but the language does not automatically cancel external I/O or remove queued callbacks.
-
-Before destruction, the abstraction must establish one of:
-
-- no external agent knows the handle;
-- the external operation has been cancelled and quiesced;
-- external callbacks consult state that prevents stale resumption;
-- ownership is transferred so destruction cannot yet occur.
-
-This is why a destructor that blindly calls `destroy()` can still be wrong even though `destroy()` itself is valid for a suspended state.
-
-## Continuations are normally non-owning
-
-In the tutorial task, a child promise stores the parent handle as a continuation. The parent owns the child task temporary; neither handle itself establishes ownership.
-
-Structured nesting makes the lifetime valid:
+Expected:
 
 ```text
-parent state owns child task wrapper
-child promise temporarily refers to parent continuation
-child completes and resumes parent
-parent finishes await-expression and destroys child wrapper
+same state: 1
+body
+done: 1
 ```
 
-Detaching either side breaks this simple proof and requires a stronger scheme.
+The experiment obtains a typed handle from our inspection hook, converts it to `coroutine_handle<>`, round-trips its opaque address, then moves the owner and resumes through the borrowed erased handle. Moving an owner did not relocate or clone the frame.
 
-## Debugging handles
+A typed handle offers `promise()` access. An erased handle still supports resumption, completion inspection, destruction, and opaque identity, but cannot expose an unknown promise type. `from_promise` is appropriate inside our return-object hook; `from_address` is only appropriate for an address originally obtained under a valid handle protocol. An arbitrary pointer is not a valid coroutine handle.
 
-Useful diagnostics include:
+The example also resumes `std::noop_coroutine()`, which safely does nothing. Ordinary null handles do not have this behavior.
 
-- a unique operation ID stored in the promise;
-- current phase (`created`, `scheduled`, `running`, `final`, `destroyed`) in debug builds;
-- logging every scheduling edge with source and destination IDs;
-- assertions against second await, duplicate resume, and destruction while registered;
-- AddressSanitizer for stale handles and ThreadSanitizer for resume races.
+## 3. Find the stale entry before running the broken design
 
-Never rely on the raw address alone as a stable identity after destruction; allocators can reuse it.
+With Lesson 8's raw queue, this is an **unsafe design fragment**:
 
-Next: [Lesson 11 — Exceptions and Cancellation](11_exception_handling.md)
+```cpp
+event_loop loop;
+{
+    auto owner = work(loop);
+    owner.start(); // Enqueues its handle.
+}                 // Destroys the frame.
+loop.run();       // Would resume a dangling handle.
+```
+
+Do not use a crash as the test. The ownership proof already fails: the queue can outlive the frame. `if (h && !h.done())` cannot repair it; `done()` itself requires a valid suspended coroutine.
+
+We can require every caller to drain before destruction, as in Lesson 8. For this lesson, implement a different contract: a scheduling awaiter unregisters itself when destroyed while queued.
+
+## 4. Give the awaiter a registration to remove
+
+[The revised event_loop.hpp](labs/10/event_loop.hpp) keeps an additional member in its awaiter:
+
+```cpp
+std::coroutine_handle<> queued_{};
+```
+
+Its suspend method records the handle and inserts it. Its resume method clears the registration:
+
+```cpp
+void await_suspend(std::coroutine_handle<> h) {
+    queued_ = h;
+    loop_.ready_.push_back(h);
+}
+void await_resume() noexcept { queued_ = {}; }
+~schedule_awaiter() { if (queued_) loop_.remove(queued_); }
+```
+
+`loop.remove(h)` uses `std::erase` on the queue. This linear removal is acceptable for a small teaching loop. The awaiter is noncopyable so a copied registration cannot unexpectedly unregister another live await.
+
+If insertion throws, await failure unwinds the awaiter and removal finds nothing. If the owner is destroyed while queued, destruction of the frame destroys this awaiter and removes the entry. If the loop runs it normally, the loop pops before resuming and `await_resume` clears the registration.
+
+The loop must outlive the awaiter. All queue access and owner destruction happen on one thread, so removal cannot race with another thread resuming the handle. A multithreaded queue requires more than this patch: synchronization plus a protocol for already-dequeued, in-flight work.
+
+## 5. Run abandonment and completion back to back
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/10/03_unregister.cpp -o scratch/ownership
+./scratch/ownership
+```
+
+[03_unregister.cpp](labs/10/03_unregister.cpp) first destroys a waiting job, then completes a second one:
+
+```text
+cleanup
+queue empty: 1
+finished
+cleanup
+```
+
+The abandoned job prints only its local destructor, and its queue entry is gone. The completed job prints `finished`, then destroys its local through ordinary completion. Both frames are eventually destroyed exactly once by their owners.
+
+**Your experiment:** add a second scheduling point before `finished`. Run one queue turn, then destroy the owner. Expect cleanup and an empty queue again. The registration belongs to the currently suspended awaiter, not permanently to a function name.
+
+## 6. Apply the preconditions to every operation you used
+
+| Operation | What our program must establish first |
+|---|---|
+| `resume()` | Live, suspended coroutine that is not at final suspend |
+| `done()` | Live suspended coroutine; reports final suspension |
+| `destroy()` | Live suspended coroutine; no later external resume can use it |
+| `promise()` | Correct typed handle to a live state |
+| `address()` round trip | Opaque identity remains tied to a live state |
+
+A null handle is not suitable for `resume`, `done`, `destroy`, or promise access. A non-null handle may still dangle. Concurrent resume/destroy is not repaired by checking a flag. Do not expose raw handles as an unrestricted public control API just because this lesson uses an inspection hook.
+
+## 7. Compare the other ownership choices against this experiment
+
+Our owner retains a final-suspended frame and destroys it with RAII. A self-destroying coroutine could instead use `final_suspend = suspend_never`, as Lesson 1 did. It must not leave an owner or observer that later touches its handle. If it can wait externally, it still needs an error sink, a lifetime while waiting, and a shutdown policy. “Detached” does not remove those obligations.
+
+Lesson 8 used separately owned callback state. The callback's `shared_ptr` kept results and completion flags alive; it did not own the coroutine frame. In a concurrent implementation, that state may also coordinate cancellation, callback quiescence, and permission to resume. The relationship between shared state and frame lifetime must be explicit.
+
+A child task's continuation also does not own its parent. In our chain, the parent owns the child temporary until completion, and the child refers back only while nested inside that lifetime. Detaching either side invalidates that simple argument.
+
+## Use an identity that survives address reuse
+
+For a debugging experiment, add an incrementing operation ID to the promise and log it at registration, dequeue, final suspend, and destruction. A handle address can help inspect one live state, but an allocator may reuse that address for another job after destruction.
+
+A stuck job can now be investigated by locating its owner, its current awaiter, and the agent responsible for the next resume. A stale resume can be investigated by comparing registration and destruction events. AddressSanitizer helps catch stale-frame access; ThreadSanitizer is relevant once a real concurrent protocol exists.
+
+```bash
+python3 tools/check_labs.py 10
+```
+
+Next: [Lesson 11 — Deliver errors and request cancellation](11_exception_handling.md).

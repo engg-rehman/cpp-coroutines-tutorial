@@ -1,5 +1,5 @@
-title: "C++20 Coroutines: From Syntax to Safe Types"
-tagline: "A practical, correctness-focused C++ coroutine tutorial"
+title: "C++20 Coroutines: Learn by Building"
+tagline: "Write, compile, investigate, and build through 12 hands-on lessons"
 description: >-
   Learn C++20 coroutines from first principles: co_await, co_yield,
   promise_type, coroutine frames, custom awaitables, task composition,
@@ -49,6 +49,10 @@ exclude:
   - build
   - build-asan
   - build-debug
+  - build-workshop
+  - scratch
+  - tools
+  - labs/checkpoints.json
   - README.md
   - CMakeLists.txt
   - Gemfile

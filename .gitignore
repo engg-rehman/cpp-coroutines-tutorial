@@ -4,3 +4,5 @@ manual_task
 _site/
 .jekyll-cache/
 .sass-cache/
+scratch/
+__pycache__/

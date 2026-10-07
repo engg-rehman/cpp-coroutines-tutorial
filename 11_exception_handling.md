@@ -1,6 +1,6 @@
 ---
-title: "C++ Coroutine Exceptions and Cancellation"
-description: "Learn how C++ coroutine exceptions cross await boundaries and how cleanup, stop tokens, cancellation races, timeouts, and structured concurrency interact."
+title: "Lesson 11: Handle Failure, Cleanup, and Cancellation"
+description: "Transport a child exception, fix an await inside catch, and cancel a scheduled job while letting cleanup finish."
 keywords:
   - C++ coroutine exception handling
   - coroutine cancellation
@@ -11,132 +11,162 @@ seo:
   type: TechArticle
 ---
 
-# Lesson 11: Exceptions, Cleanup, and Cancellation
+# Lesson 11: Let work fail and still clean up
 
-## Exception flow inside a coroutine
+Our happy path is working. Now fail a child operation, then request that a scheduled operation stop. These are separate protocols; neither is implemented by pretending the coroutine never existed.
 
-Ordinary `try`/`catch` works across suspension:
+## 1. Throw inside a child
 
-```cpp
-task<response> load() {
-    try {
-        auto data = co_await read_data();
-        co_return parse(data);
-    } catch (const parse_error&) {
-        co_return fallback_response();
-    }
-}
+[01_errors.cpp](labs/11/01_errors.cpp) has a child that throws before its `co_return`, and a parent with a catch around `co_await child()`.
+
+```bash
+mkdir -p scratch
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/11/01_errors.cpp -o scratch/errors
+./scratch/errors
 ```
 
-The handler remains part of the coroutine's generated control flow. Live RAII objects retain their lifetimes across suspension exactly as their scopes require.
-
-One syntax restriction matters: `co_await` cannot appear directly in a handler. If asynchronous cleanup is needed, capture `std::exception_ptr`, leave the handler, await cleanup, and then rethrow or translate.
-
-## Uncaught exceptions
-
-If an exception escapes the user body, generated code calls:
-
-```cpp
-promise.unhandled_exception();
-```
-
-For a result-bearing task:
-
-```cpp
-void unhandled_exception() noexcept {
-    exception = std::current_exception();
-}
-```
-
-The task awaiter later does:
-
-```cpp
-if (promise.exception) {
-    std::rethrow_exception(promise.exception);
-}
-```
-
-Thus the error appears at the parent's `co_await`. See [`examples/exceptions.cpp`](examples/exceptions.cpp).
-
-An exception thrown during very early coroutine creation or initial-suspend entry can instead propagate directly to the original caller. Promise construction and `get_return_object()` therefore also need deliberate exception specifications.
-
-## Cleanup on completion and abandonment
-
-- On normal or exceptional completion, live body locals are destroyed before final suspend.
-- Destroying a suspended incomplete coroutine destroys its live locals without executing the rest of the body.
-- Destruction does not invoke `unhandled_exception()` and does not run user `catch` blocks around code that never resumes.
-- External operations are not automatically cancelled when the frame is destroyed.
-
-An RAII registration stored in the frame can unregister a callback during destruction, but only if the external API guarantees that unregistration safely handles an in-flight callback.
-
-## Cancellation is a protocol
-
-C++ coroutine syntax has no `co_cancel` and no automatic parent-to-child cancellation. C++20's `std::stop_source`, `std::stop_token`, and `std::stop_callback` are useful building blocks, but the task and every awaited operation must agree to propagate and observe them.
-
-Typical flow:
+Expected:
 
 ```text
-owner requests stop
-  -> child operation observes token or receives callback
-  -> underlying wait is cancelled/unregistered
-  -> operation completes exactly once with cancelled status
-  -> coroutine resumes and handles/propagates cancellation
+parent caught: read failed
+result: -1
 ```
 
-Cancellation may be represented by an exception, an error code, an empty result, or a distinct result variant. Consistency matters more than the particular representation.
+Follow the actual data path in [task.hpp](labs/09/task.hpp): the child's `unhandled_exception()` stores `current_exception()`, final suspension transfers to the parent, and the parent's awaiter rethrows from `await_resume()`. The parent's ordinary catch converts failure to `-1`.
 
-## Cancellation races
+The compiler does not automatically transport every coroutine failure back to its original caller. We implemented storage and rethrowing. With Lesson 2's terminating promise, the outcome would instead be termination.
 
-Cancellation can race with successful completion. The operation state needs one atomic or locked winner:
+Try removing the parent's catch in a local copy and catching around `work.run()` in `main`. Expect the same error message there. The parent stores the propagated exception in its own promise before its root consumer rethrows it.
+
+If nobody observes a failed task's result, our educational type does not report that stored exception elsewhere. An application must decide whether every operation is joined, errors are logged, or an unobserved-error policy is enforced. Detached operations need an explicit error sink.
+
+## 2. Try awaiting cleanup inside the handler
+
+Build [02_await_in_catch.cpp](labs/11/02_await_in_catch.cpp):
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/11/02_await_in_catch.cpp -o scratch/errors
+```
+
+Expected: a compiler error forbidding `co_await` in a handler. The desire to clean up is valid; the placement is not.
+
+## 3. Save the failure and leave the handler
+
+[03_async_cleanup.cpp](labs/11/03_async_cleanup.cpp) repairs the structure:
+
+```cpp
+std::exception_ptr error;
+try {
+    throw std::runtime_error("read failed");
+} catch (...) {
+    error = std::current_exception();
+}
+co_await cleanup();
+if (error) std::rethrow_exception(error);
+```
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/11/03_async_cleanup.cpp -o scratch/errors
+./scratch/errors
+```
+
+Expected:
 
 ```text
-pending -> completed
-pending -> cancelled
+cleanup awaited
+read failed
 ```
 
-Only the winner stores the terminal result and schedules the continuation. The loser observes that the operation is already terminal and does not resume again.
+The cleanup in this checkpoint completes immediately, but its placement also permits a genuinely suspending operation when a driver exists. If cleanup itself fails, this version propagates that newer failure. An application that must retain both errors needs an aggregation policy; losing the original error should be a deliberate decision.
 
-The cancellation callback itself can race with destruction. Its registration must be removed or quiesced before the state it references disappears.
+Ordinary synchronous RAII cleanup still belongs in destructors. A destructor cannot itself become a coroutine, and frame destruction does not magically await asynchronous cleanup.
 
-## Timeouts
+## 4. Request stop without destroying the owner
 
-A timeout is a race between the primary operation and a timer. Correct behavior requires:
+[cancel.hpp](labs/11/cancel.hpp) defines our cancellation outcome and check:
 
-- one terminal winner;
-- cancellation of or detachment from the loser;
-- no duplicate continuation resume;
-- a policy for an underlying operation that cannot truly be cancelled;
-- retention of state until any unavoidable late callback is harmless.
+```cpp
+struct cancelled : std::runtime_error {
+    cancelled() : std::runtime_error("cancelled") {}
+};
+void check_stop(std::stop_token token) {
+    if (token.stop_requested()) throw cancelled{};
+}
+```
 
-Returning from the timeout await does not prove the losing OS operation has stopped touching its buffers.
+[04_cancel.cpp](labs/11/04_cancel.cpp) takes a token **by value** and checks it before and after each scheduled turn:
 
-## Structured concurrency
+```cpp
+for (int n = 1; n <= 3; ++n) {
+    check_stop(token);
+    co_await loop.schedule();
+    check_stop(token);
+    std::cout << "item " << n << '\n';
+}
+```
 
-Structured concurrency gives child operations lifetimes nested within a parent scope. Before the scope exits, children are completed or cancelled and joined. This model makes coroutine-frame ownership, exception aggregation, and shutdown substantially easier to reason about.
+Compile and run:
 
-Detached work should be exceptional. It needs an independent owner, error sink, cancellation source, and application-shutdown policy.
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/11/04_cancel.cpp -o scratch/cancel
+./scratch/cancel
+```
 
-## Exception aggregation
+Expected:
 
-When operations run concurrently, more than one can fail. A `when_all`-style primitive must document:
+```text
+item 1
+stop requested
+cleanup
+cancelled
+queue empty: 1
+```
 
-- whether the first failure cancels siblings;
-- whether it waits for siblings to finish cleanup;
-- whether it returns one error or an aggregate;
-- which executor delivers the result;
-- what happens if cancellation also occurs.
+`main` starts the task, drives one turn, requests stop, and continues driving the loop. The coroutine resumes, observes stop, throws our cancellation exception, unwinds its local guard, and completes. `result()` makes that outcome visible to the caller. The owner is retained throughout.
 
-Simple sequential `co_await` naturally reports one error at a time; concurrent composition introduces policy.
+A stop request is cooperative. It is not a forced frame deletion. There is no language `co_cancel`, no automatic parent-to-child token propagation, and no automatic interruption of blocking I/O. We pass the token explicitly.
 
-## Error-policy checklist
+## 5. Compare three shutdown paths
 
-For every coroutine return type, answer:
+Make these edits separately and predict the output:
 
-1. Where is an uncaught exception stored or reported?
-2. At which call or await does it reappear?
-3. Can an exception be silently lost if the task is never awaited?
-4. What does destroying an incomplete task do?
-5. How are cancellation and ordinary failure distinguished?
-6. How are errors from detached work observed?
+| Edit | Expected result |
+|---|---|
+| Request stop before `owner.start()` | No item prints; first check throws; guard still cleans up |
+| Remove `stop.request_stop()` | Items 1, 2, 3 print; result is 3; cleanup occurs normally |
+| Destroy the owner while queued, as in Lesson 10 | Guard cleans up and registration is removed, but no catch or result is delivered |
 
-Next: [Lesson 12 — Practical Patterns](12_practical_patterns.md)
+The last path is abandonment, not cooperative cancellation. Destruction does not execute the rest of the body, enter catches around future instructions, or call `unhandled_exception` as if cancellation had been thrown.
+
+Our token checks work because the queue will deliver another turn. For an operation that can wait indefinitely, polling only after resumption cannot wake it. An adapter might register `std::stop_callback` to cancel/unregister the underlying wait and arrange a cancelled completion. That registration must itself remain valid and be safely removed or quiesced before its referenced state disappears.
+
+## 6. Work through completion racing with stop
+
+Take Lesson 8's operation-state sketch and add three terminal outcomes: success, error, cancelled. A completion callback and a cancellation callback can both arrive. Only one may change `pending` into a terminal outcome and schedule the continuation.
+
+On paper, execute these two orders:
+
+```text
+pending -> success; later stop observes success and does nothing
+pending -> cancelled; late success observes cancelled and does nothing
+```
+
+Now execute a third scenario: the callback has already taken the handle when destruction begins. Merely clearing a stored continuation is insufficient in a multithreaded implementation. Destruction must wait for or otherwise coordinate with that in-flight callback. Atomics/locks must also make the result visible before the continuation reads it.
+
+The single-thread loop's RAII removal is a solution for its particular contract. It is not a universal callback cancellation algorithm.
+
+A timeout adds a timer as another contender. The winner may report a result, but the loser can still have outstanding OS work. Cancel or detach the loser under a documented protocol and retain buffers/state until late completion is harmless. “The timeout returned” does not prove the read stopped touching its buffer.
+
+## 7. Decide how multiple children fail together
+
+In the final lesson we will start a bounded group and drain every child before reading their outcomes. That gives child lifetimes a clear boundary. More generally, structured concurrency requires children to finish or be cancelled and joined before the enclosing operation leaves its scope.
+
+A `when_all`-style API must say whether the first error cancels siblings, whether cleanup is joined, which errors are retained, which executor delivers them, and how cancellation competes with failure. The keyword `co_await` cannot select those policies for the application.
+
+**Checkpoint:** for each of our types, name the destination of an uncaught error. The early manual job terminates, the generator rethrows through `next()`, and the task rethrows through its result or await boundary. Early allocation/parameter/promise/initial-entry failures can still escape the original invocation, as Lesson 3 established.
+
+```bash
+python3 tools/check_labs.py 11
+```
+
+Next: [Lesson 12 — Build a bounded reading report](12_practical_patterns.md).

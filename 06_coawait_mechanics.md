@@ -1,6 +1,6 @@
 ---
-title: "How co_await Works in C++20"
-description: "A precise guide to co_await operand transformation, await_transform, operator co_await, awaiter selection, and symmetric task transfer."
+title: "Lesson 6: Follow co_await Conversion and Policy"
+description: "Fix a non-awaitable operand with operator co_await, then use await_transform and repair its missing fallback."
 keywords:
   - how co_await works
   - C++20 co_await
@@ -11,213 +11,163 @@ seo:
   type: TechArticle
 ---
 
-# Lesson 6: `co_await` Mechanics
+# Lesson 6: Teach `co_await` to understand a request
 
-This lesson gives the complete selection order. The ordering matters because `await_transform()` was commonly explained incorrectly in early coroutine material.
+Suppose an operation is described by a request object. It should not need to contain scheduler bookkeeping itself. We will separate that description from the awaiter that performs the protocol, then add a promise-specific policy.
 
-## Stage 1: transform the operand
+## 1. Try awaiting a plain value
 
-For an ordinary source-level expression:
-
-```cpp
-co_await expression
+```bash
+mkdir -p scratch
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/06/01_not_awaitable.cpp -o scratch/conversion
 ```
 
-the compiler first looks for `await_transform` in the promise type.
+[01_not_awaitable.cpp](labs/06/01_not_awaitable.cpp) contains `int n = co_await 42;`. Expect a compile error: `int` has no awaiter protocol. The wording may mention `await_ready` or an invalid member access.
 
-- If the promise has a matching `await_transform`, the awaitable is `promise.await_transform(expression)`.
-- If the name is not found, the awaitable is `expression` unchanged.
-- If the promise declares `await_transform` but the call is not viable, this is generally a compile error; it does not fall back to the unchanged expression.
+`co_await` does not mean “turn any value into a future.” We need to supply the adaptation.
 
-The implicit awaits used for `initial_suspend`, `final_suspend`, and `co_yield` do not go through this ordinary `await_transform` step.
+## 2. Convert a request to the awaiter we already know
 
-Example:
+[awaitables.hpp](labs/06/awaitables.hpp) first defines an immediately ready `immediate` awaiter whose `await_resume()` returns an integer. This is Lesson 5's ready path with prints.
 
-```cpp
-struct promise_type {
-    auto await_transform(milliseconds duration) {
-        return timer_awaiter{duration};
-    }
-};
-
-task<void> example() {
-    co_await 50ms; // promise.await_transform(50ms)
-}
-```
-
-`await_transform` is a policy hook for a particular coroutine type. It can adapt domain values, attach tracing/context, or restrict which operations may be awaited.
-
-## Stage 2: select the awaiter
-
-Given the awaitable from Stage 1, the language enumerates applicable member and non-member `operator co_await` functions and uses overload resolution to select the best one. If no viable function exists, it uses the awaitable itself as the awaiter. Ambiguous overload resolution is a compile error.
-
-The result must support the three awaiter expressions.
-
-### Direct awaiter
+Add a request wrapper with this method:
 
 ```cpp
-struct immediate_int {
-    bool await_ready() const noexcept { return true; }
-    void await_suspend(std::coroutine_handle<>) const noexcept {}
-    int await_resume() const noexcept { return 42; }
-};
-```
-
-### Member conversion
-
-```cpp
-struct cached_value {
+struct request {
     int value;
-
-    immediate_int operator co_await() const noexcept {
+    immediate operator co_await() const noexcept {
+        std::cout << "member conversion\n";
         return {value};
     }
 };
 ```
 
-### Non-member conversion
+The body's edit is `co_await request{42}`. Build [02_conversion.cpp](labs/06/02_conversion.cpp):
 
-```cpp
-struct request { int id; };
-
-request_awaiter operator co_await(request value) {
-    return request_awaiter{value.id};
-}
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/06/02_conversion.cpp -o scratch/conversion
+./scratch/conversion
 ```
 
-There is no standard function named `get_awaiter`. Libraries often write one to emulate Stage 2, but it does not perform the promise's Stage 1 transformation unless the library explicitly supplies the promise.
-
-## Stage 3: run the awaiter protocol
-
-After materializing the selected awaiter:
-
-1. evaluate `await_ready()`;
-2. if false, suspend and evaluate `await_suspend(current_handle)`;
-3. obey the `void`, `bool`, or handle return rule;
-4. evaluate `await_resume()` when the current coroutine continues.
-
-The awaiter's lifetime crosses suspension. If it is a temporary, the compiler preserves it until the full await-expression completes.
-
-## `await_transform` forwarding
-
-Once a promise declares `await_transform`, it often needs a forwarding overload so unrelated awaitables still work:
-
-```cpp
-struct promise_type {
-    timer_awaiter await_transform(milliseconds value) {
-        return timer_awaiter{value};
-    }
-
-    template <class Awaitable>
-    Awaitable&& await_transform(Awaitable&& value) noexcept {
-        return std::forward<Awaitable>(value);
-    }
-};
-```
-
-This forwarding example preserves references and therefore preserves their lifetime risks. A tracing wrapper must also preserve:
-
-- the inner awaiter's value category and lifetime;
-- all three legal `await_suspend()` return types;
-- `noexcept` behavior where required;
-- reference results from `await_resume()`;
-- synchronization and thread-affinity contracts.
-
-A simplistic logger that stores `decltype(awaiter)` when that type is a reference can easily dangle.
-
-## `co_yield` expansion
-
-For a promise object `promise`, this:
-
-```cpp
-co_yield value;
-```
-
-behaves like an await on:
-
-```cpp
-promise.yield_value(value)
-```
-
-It does not call `return_value`. A generator promise normally stores or references the yielded value and returns `suspend_always`, allowing the consumer to inspect it before resuming the producer.
-
-## Initial and final awaits are special
-
-The compiler also awaits:
-
-```cpp
-promise.initial_suspend();
-promise.final_suspend();
-```
-
-These use the awaiter protocol but bypass ordinary `await_transform`. The final await must not be potentially throwing. Returning a continuation handle from a custom final awaiter is the core of task chaining:
-
-```cpp
-struct final_awaiter {
-    bool await_ready() const noexcept { return false; }
-
-    std::coroutine_handle<> await_suspend(handle_type self) const noexcept {
-        return self.promise().continuation;
-    }
-
-    void await_resume() const noexcept {}
-};
-```
-
-The current coroutine is at final suspend; the returned continuation is resumed. The completed frame remains owned and must later be destroyed.
-
-## Placement restrictions
-
-An await-expression belongs inside a suspension context of a coroutine or coroutine lambda. Important restrictions include:
-
-- not in a default argument;
-- not in a static or thread-local block-variable initializer;
-- not directly in an exception handler;
-- in declaration statements, only in the initializer;
-- not in an unevaluated or otherwise disallowed surrounding context.
-
-If cleanup needs asynchronous work after a catch, store the error information and perform the `co_await` after leaving the handler:
-
-```cpp
-std::exception_ptr error;
-try {
-    co_await operation();
-} catch (...) {
-    error = std::current_exception();
-}
-
-if (error) {
-    co_await async_cleanup();
-}
-```
-
-## Symmetric transfer in a task chain
-
-[`examples/task_chain.cpp`](examples/task_chain.cpp) uses two transfers:
-
-1. the parent task's awaiter stores the parent as the child's continuation and returns the child handle;
-2. the child's final awaiter returns the stored parent handle.
-
-The transfer path is:
+Expected:
 
 ```text
-caller resumes parent
-  -> parent awaits child and transfers to child
-  -> child completes and transfers to parent
-  -> parent receives child result and completes
-  -> parent final suspend returns noop handle
-  -> control returns to caller
+member conversion
+ready
+result
+42
 ```
 
-This design needs a clear ownership rule. In the example, the temporary child `task` object lives across its `co_await` expression in the parent frame and destroys the completed child state after `await_resume()`.
+The operand is an **awaitable** because the language can turn it into an awaiter. The returned `immediate` object actually supplies `await_ready`, `await_suspend`, and `await_resume`.
 
-## Common mistakes
+A free `operator co_await(request)` can serve the same purpose, including through argument-dependent lookup. The header also defines a distinct `free_request` type to demonstrate this. Member and non-member candidates participate in overload resolution; neither form has an unconditional priority. Ambiguous selection is a compile error. If no viable conversion exists, the awaitable itself must satisfy the awaiter protocol.
 
-1. Applying `operator co_await` before `await_transform`.
-2. Assuming any type with `await_ready()` bypasses a promise's `await_transform`.
-3. Calling `resume()` from `await_suspend()` and then accessing the awaiter; resumption may destroy it.
-4. Returning the awaiting coroutine's own handle from `await_suspend()` without a carefully proved protocol; this can cause reentrancy or invalid self-resumption.
-5. Storing references in an awaiter without ensuring the referents outlive the await-expression.
-6. Treating a handle returned from `await_suspend()` as owned by the awaiter.
+## 3. Let this coroutine type interpret integers
 
-Next: [Lesson 7 — `co_yield` and Generators](07_coyield_generators.md)
+Return to `co_await 42`. Add this method to the promise:
+
+```cpp
+request await_transform(int n) const noexcept {
+    std::cout << "transform\n";
+    return {n};
+}
+```
+
+The complete owner with that one policy is [restricted_job.hpp](labs/06/restricted_job.hpp). Build [03_transform.cpp](labs/06/03_transform.cpp):
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/06/03_transform.cpp -o scratch/conversion
+./scratch/conversion
+```
+
+Expected:
+
+```text
+transform
+member conversion
+ready
+result
+42
+```
+
+The print order is the point: promise transformation happens **before** awaiter conversion. The promise turns `42` into a `request`, the request supplies an `immediate`, and that awaiter performs the protocol.
+
+This lets a coroutine type interpret domain values such as timer durations, inject an executor or stop token, or prohibit unsupported operations. Our integer policy is small enough to trace without a timer implementation.
+
+## 4. Break an awaitable that used to work
+
+Use the same promise but replace the body operand with `std::suspend_never{}`. Build [04_restricted.cpp](labs/06/04_restricted.cpp):
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/06/04_restricted.cpp -o scratch/conversion
+```
+
+Expected: failure to convert the argument to the `int` accepted by `await_transform`.
+
+The promise now declares that name, so an ordinary source-level await must go through it. The compiler does not silently bypass the method because another operand already has `await_ready`. This is a real compatibility consequence of adding a policy hook.
+
+## 5. Restore other awaitables deliberately
+
+Add a forwarding overload beside the integer overload:
+
+```cpp
+template<class A>
+A&& await_transform(A&& a) const noexcept {
+    return std::forward<A>(a);
+}
+```
+
+The repaired owner is [policy_job.hpp](labs/06/policy_job.hpp). [05_forward.cpp](labs/06/05_forward.cpp) awaits `free_request{7}` to exercise both the fallback and free conversion:
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/06/05_forward.cpp -o scratch/conversion
+./scratch/conversion
+```
+
+Expected:
+
+```text
+free conversion
+ready
+result
+7
+```
+
+There is no `transform` print because that print belongs to the integer overload. In a local copy, try `std::suspend_never{}` again as a standalone expression, `co_await std::suspend_never{};`. It now compiles. Do not assign it to `int`: its result is `void`.
+
+Forwarding preserves references and value categories; it does not create ownership. The temporary awaiter created for an await-expression survives its suspension until the expression completes. Objects merely referenced by it still need their own lifetime proof.
+
+A generic tracing adapter needs more care than these print statements: preserve the inner awaiter's lifetime, all three `await_suspend` return forms, reference results, and required `noexcept` behavior. Storing a reference to a local conversion result would reintroduce Lesson 4's bug.
+
+## 6. Notice what did not break
+
+Our restricted promise could still initially suspend and finally suspend even though it accepts only integer operands. The compiler's initial and final awaits bypass ordinary `await_transform`. So does the implicit await used by `co_yield`.
+
+In Lesson 7, we will exploit this by deleting ordinary `await_transform` in a synchronous generator. Yielding will still work, while arbitrary async awaits will be rejected.
+
+The selection path you have now observed is:
+
+```text
+source operand
+  -> promise.await_transform, if the promise declares it
+  -> selected member/free operator co_await, if viable
+  -> awaiter.await_ready
+  -> awaiter.await_suspend, if not ready
+  -> awaiter.await_resume, when continuing
+```
+
+There is no standard function called `get_awaiter`. Libraries sometimes implement one for the conversion step; it does not automatically perform the promise's transformation.
+
+## 7. Try an invalid placement
+
+In a local copy, put a standalone await directly inside a `catch` block. Expect a compile error. In Lesson 11 we will move asynchronous cleanup after the handler and retain the exception in `exception_ptr`.
+
+In C++20, awaits belong in permitted suspension contexts within coroutine bodies. They cannot appear in default arguments, unevaluated contexts, static/thread-local block-variable initializers, or directly in handlers; in a declaration statement they belong in its initializer. An ordinary `try` body may await, and its handler may catch an await's error.
+
+**Your experiment:** change `immediate::await_ready()` to false, keep its empty `void await_suspend`, and add a second owner resume to `main`. Expect `result` and the integer only after that second resume. Conversion selects the awaiter; it does not determine whether the selected awaiter suspends.
+
+```bash
+python3 tools/check_labs.py 06
+```
+
+Next: [Lesson 7 — Pull one value at a time](07_coyield_generators.md).

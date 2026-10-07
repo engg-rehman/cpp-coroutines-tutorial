@@ -17,3 +17,17 @@ add_test(NAME generator_runs COMMAND generator)
 add_test(NAME task_chain_runs COMMAND task_chain)
 add_test(NAME event_loop_runs COMMAND event_loop)
 add_test(NAME exceptions_run COMMAND exceptions)
+
+# The workshop includes intentionally invalid programs. Compile them only via
+# the checker, which requires failure and checks the relevant diagnostic.
+add_executable(workshop_report labs/12/01_report.cpp)
+target_compile_options(workshop_report PRIVATE -Wall -Wextra -Wpedantic)
+
+if(BUILD_TESTING)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    foreach(lesson IN ITEMS 01 02 03 04 05 06 07 08 09 10 11 12)
+        add_test(NAME workshop_${lesson}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_labs.py
+                ${lesson} --cxx ${CMAKE_CXX_COMPILER})
+    endforeach()
+endif()

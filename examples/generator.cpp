@@ -19,7 +19,7 @@ public:
         }
         std::suspend_always initial_suspend() const noexcept { return {}; }
         std::suspend_always final_suspend() const noexcept { return {}; }
-        std::suspend_always yield_value(T value) noexcept {
+        std::suspend_always yield_value(T value) {
             current.emplace(std::move(value));
             return {};
         }

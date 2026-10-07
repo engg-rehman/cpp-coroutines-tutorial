@@ -1,6 +1,6 @@
 ---
-title: "C++ Coroutine Suspension and Resumption"
-description: "Master the C++ awaiter protocol: await_ready, await_suspend, await_resume, symmetric transfer, publication races, and handle preconditions."
+title: "Lesson 5: Build an Awaiter One Error at a Time"
+description: "Implement the three awaiter methods and trace ready, suspended, and cancelled-suspension paths."
 keywords:
   - C++ awaiter protocol
   - await_ready
@@ -12,163 +12,192 @@ seo:
   type: TechArticle
 ---
 
-# Lesson 5: Suspension and Resumption
+# Lesson 5: Replace the magic pause with your own awaiter
 
-## The awaiter protocol
+We have used `std::suspend_always` without implementing it. Now replace it with a type named `pause` and let the compiler tell us what is missing.
 
-After awaitable conversion (Lesson 6), `co_await` operates on an awaiter with three expressions:
+## 1. An empty type does not know how to pause
+
+[01_missing_ready.cpp](labs/05/01_missing_ready.cpp) contains:
 
 ```cpp
-struct awaiter {
-    bool await_ready();
-    void await_suspend(std::coroutine_handle<> awaiting);
-    result_type await_resume();
+struct pause {};
+manual_job work() {
+    co_await pause{};
+    std::cout << "after\n";
+}
+```
+
+```bash
+mkdir -p scratch
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/05/01_missing_ready.cpp -o scratch/awaiter
+```
+
+Expected: compilation fails, mentioning `await_ready`. The coroutine return type already works; this error belongs to the operand of `co_await`.
+
+The object the compiler uses to perform an await is called the **awaiter**. Here `pause{}` is directly that object. Lesson 6 will add a conversion between the operand and the awaiter.
+
+## 2. Answer the readiness question
+
+Add:
+
+```cpp
+bool await_ready() const noexcept { return false; }
+```
+
+Compile [02_missing_suspend.cpp](labs/05/02_missing_suspend.cpp):
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/05/02_missing_suspend.cpp -o scratch/awaiter
+```
+
+Expected: missing `await_suspend`.
+
+`false` means this operation is not ready to complete immediately. The result need only be contextually convertible to `bool`. The compiler still needs to know what to do after it suspends the coroutine.
+
+## 3. Accept the suspended coroutine's handle
+
+Add:
+
+```cpp
+void await_suspend(std::coroutine_handle<>) const noexcept {}
+```
+
+Compile [03_missing_resume.cpp](labs/05/03_missing_resume.cpp):
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/05/03_missing_resume.cpp -o scratch/awaiter
+```
+
+Expected: missing `await_resume`.
+
+The argument is a handle to the awaiting coroutine. We accept an erased handle because this operation does not need the promise type. A more specialized awaiter may accept a typed handle.
+
+The coroutine is already considered suspended when `await_suspend` is called. Our empty method leaves it suspended and does not register it anywhere. This is sufficient only because `main` already owns the coroutine and will manually resume it.
+
+A scheduler awaiter will store that handle; a task awaiter will return another handle. We will build both.
+
+## 4. Finish the await-expression
+
+Add:
+
+```cpp
+void await_resume() const noexcept {}
+```
+
+Now build and run [04_pause.cpp](labs/05/04_pause.cpp):
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/05/04_pause.cpp -o scratch/awaiter
+./scratch/awaiter
+```
+
+Expected output: `after`, once. The first owner resume starts the body and reaches `pause`. The second completes that await-expression and executes the print.
+
+`await_resume()` is the last part of evaluating `co_await`, before execution proceeds past the expression. Its return value becomes the result of the whole await. Our pause has no result, so it returns `void`.
+
+## 5. Return a value and trace three different paths
+
+[05_paths.cpp](labs/05/05_paths.cpp) replaces `pause` with:
+
+```cpp
+struct value_awaiter {
+    bool ready;
+    bool stay_suspended;
+    bool await_ready() const noexcept {
+        std::cout << "ready\n";
+        return ready;
+    }
+    bool await_suspend(std::coroutine_handle<>) const noexcept {
+        std::cout << "suspend\n";
+        return stay_suspended;
+    }
+    int await_resume() const noexcept {
+        std::cout << "resume\n";
+        return 42;
+    }
 };
 ```
 
-The exact member qualifiers and handle type can differ. `await_ready()` must be contextually convertible to `bool`. `await_suspend()` may accept a typed handle such as `std::coroutine_handle<promise_type>` and may return `void`, `bool`, or a coroutine handle. `await_resume()` can return `void`, a value, or a reference.
+The body assigns `int result = co_await value_awaiter{ready, stay};`. Before running, predict which methods print for `(true, false)`, `(false, false)`, and `(false, true)`.
 
-## `await_ready()`
-
-If it returns `true`, the coroutine does not suspend and `await_resume()` is evaluated immediately:
-
-```cpp
-struct ready_value {
-    int value;
-    bool await_ready() const noexcept { return true; }
-    void await_suspend(std::coroutine_handle<>) const noexcept {}
-    int await_resume() const noexcept { return value; }
-};
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/05/05_paths.cpp -o scratch/awaiter
+./scratch/awaiter
 ```
 
-`await_suspend()` is not called on this path. Calling `await_ready()` an “optimization only” is incomplete: it is also part of the awaiter's observable semantics and may represent an already-completed operation.
-
-## Suspension happens before `await_suspend()`
-
-If `await_ready()` is false, the coroutine is considered suspended before `await_suspend()` is evaluated. This ordering lets `await_suspend()` safely publish the handle to a scheduler or callback system.
-
-Conceptual pseudocode—not valid C++ source—is:
+Expected output, grouped here into the three experiments:
 
 ```text
-awaiter = select_awaiter(operand)
-if awaiter.await_ready() is false:
-    save resume state; coroutine is now suspended
-    evaluate awaiter.await_suspend(current_handle)
-    follow its return-type rule
-evaluate awaiter.await_resume()
+start
+ready
+resume
+value: 42
+back in main
+start
+ready
+suspend
+resume
+value: 42
+back in main
+start
+ready
+suspend
+back in main
+resume
+value: 42
 ```
 
-The call to `await_resume()` happens after either no suspension, cancellation of suspension, or later resumption.
+The first path never suspends. The second reaches `await_suspend` but returns `false`, cancelling suspension so evaluation continues directly with `await_resume`. It does not mean the compiler makes a separate `handle.resume()` call. The third stays suspended until the caller resumes it again.
 
-## Three `await_suspend()` return forms
+This also disproves “every `co_await` gives control back to the caller.” It may finish synchronously.
 
-### `void`
+## 6. Choose the appropriate suspend result
 
-```cpp
-void await_suspend(std::coroutine_handle<> current) {
-    queue.push(current);
-}
-```
-
-When it returns normally, control returns to the current coroutine's caller or resumer. Some other agent must eventually resume the handle.
-
-### `bool`
+You have implemented `void` and `bool` forms. The third legal form returns a coroutine handle:
 
 ```cpp
-bool await_suspend(std::coroutine_handle<> current) {
-    if (register_waiter(current)) {
-        return true;  // remain suspended
-    }
-    return false;     // cancel suspension; continue this coroutine
-}
-```
-
-Returning `false` does not mean “the compiler calls `current.resume()`.” Semantically, suspension is cancelled and execution continues with `await_resume()` on the current execution path. Returning `true` leaves the coroutine suspended.
-
-This form is useful for closing a race: the operation may become ready between `await_ready()` and waiter registration.
-
-### another coroutine handle
-
-```cpp
-std::coroutine_handle<> await_suspend(
-    std::coroutine_handle<> continuation) noexcept {
-    child.promise().continuation = continuation;
+std::coroutine_handle<> await_suspend(std::coroutine_handle<> parent) noexcept {
+    child.promise().continuation = parent;
     return child;
 }
 ```
 
-The returned coroutine is resumed. The current coroutine remains suspended. This semantic pattern is called **symmetric transfer** and is useful for task chaining. It avoids a mandatory round-trip through user scheduler code; whether the implementation performs a literal tail call is not a portable guarantee.
+This is a preview fragment; `child` will be introduced in Lesson 9. Returning the child resumes it while the parent remains suspended. Returning from the child's final await to the parent completes the chain. This is called symmetric transfer. It expresses a control transfer; a particular machine-code tail call or stack-depth guarantee is not portable.
 
-`std::noop_coroutine()` is a valid returned handle that safely does nothing when resumed.
+`std::noop_coroutine()` is a valid handle to return when no continuation needs work. Returning a null handle is not the equivalent of a noop continuation.
 
-## `await_resume()`
+| Return from `await_suspend` | What happens after a normal return |
+|---|---|
+| `void` | Current coroutine remains suspended; caller/resumer regains control |
+| `true` | Current coroutine remains suspended |
+| `false` | Suspension is cancelled; continue with `await_resume` |
+| A coroutine handle | Resume the returned coroutine; current coroutine stays suspended |
 
-This expression determines the type and value category of the entire `co_await` expression:
+## 7. Make the operation fail deliberately
 
-```cpp
-int bytes = co_await async_read();
-// `bytes` is initialized from the selected awaiter's await_resume().
+In a local copy of `05_paths.cpp`, put a `try`/`catch(const std::runtime_error&)` around the `co_await` and include `<stdexcept>`. Remove `noexcept` from the method you change, then throw `std::runtime_error{"probe"}` from one method at a time.
+
+Expected observations:
+
+- Throw from `await_ready`: the body's catch runs without suspension; `await_suspend` and `await_resume` do not print.
+- Throw from `await_suspend`: suspension is undone and the exception appears at the await-expression; `await_resume` does not run for that failed await.
+- Throw from `await_resume`: it is an ordinary expression failure at the await boundary.
+
+If you omit the body catch, our current `manual_job` reaches `unhandled_exception` and terminates. If you retain `noexcept` while throwing, termination follows the noexcept rule before that recovery path. These are different experiments.
+
+`await_resume` can also return a reference. The await-expression preserves the corresponding result category; returning a reference does not extend the referenced object's lifetime.
+
+## A constraint to carry into the next lessons
+
+Once `await_suspend` publishes a handle to code that can resume it, the coroutine may run and destroy the awaiter before `await_suspend` returns. On another thread this can happen concurrently. Arrange invariants before publication and do not touch frame-backed members afterward unless the protocol proves they remain valid. If registration throws after publishing a live handle, you also need to revoke that registration; otherwise a later callback can resume an already-continued coroutine.
+
+Cross-thread designs must publish results with synchronization and preserve the frame's lifetime. Thread-local state, UI affinity, and locks may change meaning after migration. C++20 additionally has execution-agent restrictions: resumption across agents is implementation-defined outside the standard thread/main cases. Our examples stay on one thread; the later callback lesson will make its limits explicit.
+
+**Checkpoint:** explain why printing `resume` does not prove the coroutine actually suspended, and why `done()` cannot make a dangling or concurrently running handle safe.
+
+```bash
+python3 tools/check_labs.py 05
 ```
 
-Result-bearing tasks typically inspect the promise here, rethrow a stored exception if present, and otherwise return the stored result.
-
-Do not assume “resume after the `co_await` line” means `await_resume()` has already run. `await_resume()` is the last part of evaluating that line.
-
-## Exceptions from the protocol
-
-- If awaitable conversion or `await_ready()` throws, no suspension has occurred and the exception is thrown at the `co_await` expression.
-- If `await_suspend()` throws, the coroutine catches that machinery-level failure, resumes itself, and the exception is thrown from the `co_await` expression. `await_resume()` is not used for that failed await.
-- If `await_resume()` throws, it behaves like any expression throwing in the coroutine body.
-
-If none is caught inside the body, the generated outer handler calls `promise.unhandled_exception()`.
-
-## The publication race
-
-An awaiter may transfer a handle to another thread inside `await_suspend()`. That thread is allowed to resume the coroutine before `await_suspend()` returns. Resumption may run to completion and another owner may destroy the frame.
-
-Therefore, after publishing the handle, treat `*this` and every reference into the coroutine frame as potentially destroyed:
-
-```cpp
-void await_suspend(std::coroutine_handle<> handle) {
-    operation->set_continuation(handle);
-    operation->start(); // may complete and resume immediately
-    // Do not access awaiter members here unless the protocol guarantees safety.
-}
-```
-
-Real callback-backed awaiters usually need atomic state or a lock to resolve “completed” versus “waiter installed.” Memory ordering must make the result visible before resumption.
-
-## Resuming on another thread
-
-Cross-thread resumption is possible, but it changes the execution context:
-
-- thread-local state may differ;
-- a mutex must not be held across suspension and unlocked on an incompatible thread;
-- UI objects may require resumption on the UI thread;
-- concurrent attempts to resume the same coroutine are a data race and usually undefined behavior at a higher level.
-
-In C++20, cross-agent resumption is implementation-defined unless the relevant execution agents are `std::thread`/`std::jthread` instances or the thread executing `main`. Check a runtime's guarantees when callbacks originate from threads not represented by those standard types.
-
-A scheduler awaiter should make thread-affinity behavior part of its contract.
-
-## Handle preconditions
-
-For ordinary coroutine handles:
-
-- `resume()` requires a non-null suspended coroutine not at final suspend;
-- `done()` is meaningful for a suspended coroutine and reports final suspension;
-- `destroy()` requires a suspended coroutine;
-- a copied handle does not extend lifetime.
-
-The checked examples wrap these operations so callers do not casually violate the preconditions.
-
-## Exercise
-
-Read [`examples/event_loop.cpp`](examples/event_loop.cpp) and trace:
-
-1. when the job becomes suspended;
-2. when its handle enters and leaves the ready queue;
-3. why `work` must outlive `loop.run()`;
-4. what ownership protocol would be needed if the queue itself owned scheduled jobs.
-
-Next: [Lesson 6 — `co_await` Mechanics](06_coawait_mechanics.md)
+Next: [Lesson 6 — Find out which object `co_await` really uses](06_coawait_mechanics.md).

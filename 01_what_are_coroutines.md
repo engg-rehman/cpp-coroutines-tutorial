@@ -1,6 +1,6 @@
 ---
-title: "What Are C++20 Coroutines?"
-description: "Understand C++20 coroutines, coroutine frames, promise_type, return objects, handles, co_await, co_yield, and co_return."
+title: "Lesson 1: Make co_return Compile"
+description: "Build a C++20 coroutine from a failing co_return, adding each promise method in response to compiler diagnostics."
 keywords:
   - what are C++ coroutines
   - C++20 coroutines
@@ -12,151 +12,170 @@ seo:
   type: TechArticle
 ---
 
-# Lesson 1: What Are Coroutines?
+# Lesson 1: Make `co_return` compile
 
-## The short definition
+Open an editor and a terminal in this repository. We will write a function that prints `hello`. The first version will not compile. Every change below answers a problem the compiler exposes. You do not need to understand a finished coroutine type before starting.
 
-A coroutine is a function whose execution can be suspended and later resumed. While suspended, its live state is retained in a **coroutine state**, commonly called the coroutine frame.
+Use a C++20 compiler and standard library with `<coroutine>` support. The commands use `clang++`; you can substitute a suitable `g++`. Create a place for your experiments:
 
-A function is a coroutine if its body contains any of:
-
-- `co_await`: await an operation, possibly suspending;
-- `co_yield`: publish a value and await the promise's yield operation;
-- `co_return`: complete through the promise object.
-
-These keywords trigger a compile-time transformation. They do not create a thread, event loop, or scheduler.
-
-## First working example
-
-The complete program is [`examples/manual_task.cpp`](examples/manual_task.cpp). Its important pieces are:
-
-```cpp
-class manual_task {
-public:
-    struct promise_type;
-    using handle_type = std::coroutine_handle<promise_type>;
-
-    struct promise_type {
-        manual_task get_return_object() noexcept {
-            return manual_task{handle_type::from_promise(*this)};
-        }
-        std::suspend_never initial_suspend() const noexcept { return {}; }
-        std::suspend_always final_suspend() const noexcept { return {}; }
-        void return_void() const noexcept {}
-        void unhandled_exception() const noexcept { std::terminate(); }
-    };
-
-    // The full example makes this owner move-only and destroys the frame.
-};
+```bash
+mkdir -p scratch
 ```
 
-The coroutine itself is ordinary-looking code:
+All commands in the tutorial run from the repository root. `scratch/` is your editable workspace. Saved checkpoints under `labs/` let you recover without losing the sequence. Diagnostics below show the **important part of the message**, not a promise about exact wording or diagnostic order. Compilers may report several missing methods together.
+
+## 1. Try the smallest function
+
+Create `scratch/hello.cpp`:
 
 ```cpp
-manual_task demonstration() {
-    std::cout << "coroutine: start\n";
-    co_await std::suspend_always{};
-    std::cout << "coroutine: resumed\n";
+#include <coroutine>
+
+void hello() {
+    co_return;
+}
+
+int main() {
+    hello();
 }
 ```
 
-Because `initial_suspend()` returns `suspend_never`, the body starts during the call. `suspend_always` then gives control back. The owner later calls `resume()`. Because `final_suspend()` suspends, the owner can safely call `destroy()` in its destructor.
+Compile it:
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic scratch/hello.cpp -o scratch/hello
+```
+
+**Expected: compilation fails**, mentioning `std::coroutine_traits<void>` and a missing `promise_type`. Compare [checkpoint 01](labs/01/01_void.cpp).
+
+An ordinary `return;` finishes a `void` function using the ordinary function rules. Writing `co_return;` asks the compiler to transform the function into a coroutine. The compiler now needs a type that tells it what to do at creation, completion, and suspension. `void` supplies no such type.
+
+Adding `<coroutine>` supplies the library declarations. It does not invent a coroutine return type for us.
+
+## 2. Give the compiler a place to find the policy
+
+Replace `void hello()` with `job hello()` and put this before the function:
+
+```cpp
+struct job {
+    struct promise_type {};
+};
+```
+
+Compile again. **It still fails**, now about missing members of `job::promise_type`. You have fixed the first problem. [Checkpoint 02](labs/01/02_empty_promise.cpp) records this version.
+
+Why that exact nested name? For `R function(Args...)`, the compiler consults `std::coroutine_traits<R, Args...>::promise_type`. Its usual behavior is to find `R::promise_type`. We chose `job` as `R`, so `job::promise_type` is the customization object it will construct for each invocation. This is unrelated to `std::promise`.
+
+You can specialize `std::coroutine_traits` for appropriate user-defined types; we use the nested name because it keeps the policy beside the return type. A non-static member coroutine also contributes its implicit object-parameter type to the traits arguments. You will see why member functions need special lifetime care in Lesson 4.
+
+## 3. Decide what the caller receives
+
+Add this inside the empty promise:
+
+```cpp
+job get_return_object() noexcept { return {}; }
+```
+
+Compile again. Missing suspension/completion methods still prevent compilation. [Checkpoint 03](labs/01/03_return_object.cpp) contains the edit.
+
+`hello()` is declared to return a `job`. `get_return_object()` creates that object for the caller. The promise object and the returned `job` are **different objects**. Our returned object is empty for now; later it will carry a way to resume the coroutine.
+
+## 4. Decide whether the body starts immediately
+
+Add:
+
+```cpp
+std::suspend_never initial_suspend() const noexcept { return {}; }
+```
+
+Compile again. It still fails. [Checkpoint 04](labs/01/04_initial_suspend.cpp) has the current version.
+
+Before executing our body, the compiler asks the promise for an initial suspension operation. `suspend_never` says to keep going. We want `hello()` to execute during the call, so that is the simplest choice. Lesson 2 changes it and observes the result.
+
+## 5. Decide what happens at completion
+
+Add:
+
+```cpp
+std::suspend_never final_suspend() const noexcept { return {}; }
+```
+
+Compile again. Completion and exception hooks are still missing. See [checkpoint 05](labs/01/05_final_suspend.cpp).
+
+For this first example, completion should also keep going through cleanup: no suspended state remains. This works because our empty `job` holds no handle that could become stale. **When we introduce an owning handle in Lesson 2, we will change final suspension to retain the state.** These choices belong together.
+
+The final suspension operation must not throw. That is why this method, and the final awaiter protocol, use `noexcept`.
+
+## 6. Give `co_return;` its meaning
+
+Add:
+
+```cpp
+void return_void() const noexcept {}
+```
+
+Compile again. The exception hook is still missing. See [checkpoint 06](labs/01/06_return_void.cpp).
+
+`co_return;` asks the promise to run `return_void()`. Our function has no result to store, so the method is empty. Later, `co_return 42;` will require a different hook, `return_value(42)`.
+
+The empty body is not pointless boilerplate: it states this coroutine's completion policy. It is also why falling off this coroutine's body will be allowed. Falling off a value-returning coroutine without a valid `return_void` path is undefined behavior, not an implicit default result.
+
+## 7. Choose an uncaught-exception policy
+
+Add `#include <exception>` and this promise method:
+
+```cpp
+void unhandled_exception() const noexcept { std::terminate(); }
+```
+
+The compiler needs a policy even though our tiny body does not explicitly throw. For this first type, an exception escaping the body terminates the program. We will replace this with stored exceptions for generators and tasks.
+
+Now add `#include <iostream>` and print inside `hello()`:
+
+```cpp
+job hello() {
+    std::cout << "hello\n";
+    co_return;
+}
+```
+
+Compile and run:
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic scratch/hello.cpp -o scratch/hello
+./scratch/hello
+```
 
 Expected output:
 
 ```text
-coroutine: start
-main: before resume
-coroutine: resumed
-main: after resume
+hello
 ```
 
-## Five distinct objects and ideas
+Your complete program should match [checkpoint 07](labs/01/07_hello.cpp). Read it now: every method exists because you encountered a specific requirement.
 
-Keeping these names separate prevents most confusion.
+## 8. Make two small changes yourself
 
-1. **Coroutine function**: the source-level function containing a `co_` keyword.
-2. **Coroutine state/frame**: storage for the promise, parameter copies, live locals, awaiters, and implementation bookkeeping.
-3. **Promise object**: an object inside the state that customizes creation, initial/final suspension, result storage, yielding, and uncaught exceptions.
-4. **Return object**: the ordinary object returned to the caller by `get_return_object()`—for example, `task<int>` or `generator<int>`.
-5. **Handle**: a small, non-owning `std::coroutine_handle<Promise>` referring to the state.
+First replace `co_return;` with `return;`. Compile. Ordinary `return` is forbidden in a function that is a coroutine—but with no remaining `co_` keyword, this particular function becomes an ordinary `job` function, so `return;` instead fails because it supplies no `job`. Keep another `co_` keyword in the body and the diagnostic changes to the coroutine restriction. Classification depends on the whole function body.
 
-The “promise” here is a coroutine protocol object. It is not `std::promise`.
+Restore the program. Replace `co_return;` with `co_return 42;`. Compile. You should see a missing `return_value` diagnostic. Do not add that hook alongside `return_void`; declaring both is rejected. We will build a value-returning type in Lesson 9.
 
-## How the promise type is selected
+Restore `co_return;` before continuing.
 
-For a coroutine declared as `R function(P1, P2)`, the compiler obtains the promise type from:
+## What you have actually built
 
-```cpp
-std::coroutine_traits<R, P1, P2>::promise_type
+You have a coroutine that runs immediately, prints, completes, and cleans up without leaving suspended work behind. It has not created a thread or scheduled anything.
+
+The language identifies a coroutine from `co_return`, `co_await`, or `co_yield` in its body. We used the first. We will discover the other two by needing to pause and to produce successive values.
+
+The restrictions also become easier to place now: `main`, constructors, destructors, C++20 `constexpr`/`consteval` functions, functions with placeholder return types, and C-style variadic functions cannot be coroutines. Variadic templates can be. Keep `main` ordinary and have it call your coroutine, as we did here.
+
+**Before moving on:** close the finished source and reconstruct the five methods from the failures. Explain separately what creates the object received by `main`, what handles `co_return;`, and what handles an uncaught exception.
+
+To check every saved step, including expected failures:
+
+```bash
+python3 tools/check_labs.py 01
 ```
 
-For a non-static member coroutine, the implicit object-parameter type is included before the explicit parameter types. The primary `coroutine_traits` template normally finds `R::promise_type`, which is why return wrappers usually contain a nested type:
-
-```cpp
-struct task {
-    struct promise_type { /* protocol */ };
-};
-```
-
-Specializing `std::coroutine_traits` for suitable user-defined types is possible, but a nested `promise_type` is clearer for most designs.
-
-## The three keywords
-
-### `co_await expression`
-
-Evaluates an awaitable, asks whether it is ready, and may suspend. It can produce a value:
-
-```cpp
-int bytes = co_await async_read(buffer);
-```
-
-“Await” does not imply suspension. If `await_ready()` is true, execution continues synchronously.
-
-### `co_yield expression`
-
-Conceptually equivalent to:
-
-```cpp
-co_await promise.yield_value(expression);
-```
-
-The promise chooses how to store or expose the yielded value. Generators normally return `suspend_always` from `yield_value()`.
-
-### `co_return expression`
-
-Calls `promise.return_value(expression)` and transfers control to final suspend. A valueless `co_return;` calls `promise.return_void()`.
-
-A coroutine cannot use an ordinary `return` statement. Falling off the end is equivalent to `co_return;` only if calling `return_void()` is valid; otherwise it is undefined behavior.
-
-## Coroutines versus ordinary functions
-
-| Property | Ordinary function | Coroutine |
-|---|---|---|
-| execution | call to return/throw in one activation | may suspend and resume multiple times |
-| live locals | ordinary activation storage | retained in coroutine state when needed |
-| result protocol | language return object | promise-defined return/yield behavior |
-| caller receives | declared return value | object produced by `get_return_object()` |
-| scheduling | runs on caller's thread | still library-defined; may resume on any arranged thread |
-
-A coroutine is not necessarily asynchronous. A generator is a coroutine but typically runs synchronously when its consumer asks for the next value.
-
-## Important restrictions
-
-- `main` cannot be a coroutine.
-- constructors and destructors cannot be coroutines.
-- C++20 coroutines cannot be `constexpr` or `consteval` functions.
-- the declared return type cannot use a placeholder such as an undeduced `auto`;
-- a C-style variadic parameter list (`...`) is not allowed; a variadic template is allowed.
-- `co_await` is restricted to suspension contexts; among other things, it cannot appear in a default argument or directly inside an exception handler.
-
-## Check your understanding
-
-For `examples/manual_task.cpp`, answer:
-
-1. Who owns the coroutine state?
-2. Why must that owner be move-only?
-3. What would become unsafe if `final_suspend()` returned `suspend_never`?
-4. Which line causes actual suspension, and which line merely requests resumption?
-
-Next: [Lesson 2 — Why Coroutines?](02_why_coroutines.md)
+Next: [Lesson 2 — Make a function remember where it stopped](02_why_coroutines.md).

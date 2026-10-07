@@ -7,7 +7,41 @@ sitemap: false
 
 # Correctness Audit
 
-## Verdict
+## Current workshop validation
+
+All twelve lessons now teach through edits, compiler diagnostics, execution traces,
+and repairs. The [coverage map](00_ROADMAP.md) tracks the original concepts through
+the new sequence. Complete teaching checkpoints live in `labs/`; `examples/`
+remains a compact supplementary reference.
+
+The workshop has 49 checked scenarios. Intentionally invalid sources must fail
+compilation with a relevant diagnostic; runnable checkpoints must match their
+documented output and exit status. Unsafe lifetime fragments are explicitly
+labelled in the prose and are not executed by the checker.
+
+Validated locally with Apple Clang 21 and C++20:
+
+```bash
+python3 tools/check_labs.py
+python3 tools/check_labs.py --sanitize
+cmake -S . -B build-workshop
+cmake --build build-workshop
+ctest --test-dir build-workshop --output-on-failure
+```
+
+The combined CTest run passes all 17 tests (five supplementary examples and twelve
+lesson checks). The runnable workshop programs also pass AddressSanitizer and
+UndefinedBehaviorSanitizer checks. Relative documentation links and checkpoint
+paths were checked. This is local compiler validation, not a claim of testing
+every compiler or a production concurrent runtime.
+
+The new generator permits throwing value construction in `yield_value`; the same
+unconditional `noexcept` was removed from the supplementary generic generator.
+The workshop task enforces one start/consumer, includes `task<void>`, and retains
+the child owner through its await-expression. Lesson 10's loop unregisters queued
+handles during frame destruction under an explicit single-thread contract.
+
+## Earlier audit context
 
 The original tutorial had a useful lesson order and good intuition, but several complete examples did not compile and several lifetime claims were unsafe. The tutorial has been revised so that its canonical examples compile under C++20 and ownership is explicit.
 
@@ -46,6 +80,6 @@ The original tutorial had a useful lesson order and good intuition, but several 
 - scheduler affinity, reentrancy, data races, abandonment, and structured concurrency
 - debugging and performance measurement
 
-## Validation
+## Earlier example validation
 
 The programs in `examples/` are built with C++20 and warning flags. CMake/CTest provides a repeatable check. Explanatory pseudocode is clearly labelled rather than presented as a complete program.

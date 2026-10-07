@@ -1,6 +1,6 @@
 ---
-title: "C++ co_yield and Generator Coroutines"
-description: "Build a safe, lazy C++20 generator and understand co_yield, yield_value, generator completion, value lifetime, and exception propagation."
+title: "Lesson 7: Build a Pull Generator"
+description: "Start with a missing yield_value error and construct a finite generator with checked values, errors, and early cleanup."
 keywords:
   - C++ co_yield
   - C++20 generator
@@ -11,136 +11,161 @@ seo:
   type: TechArticle
 ---
 
-# Lesson 7: `co_yield` and Generators
+# Lesson 7: Produce a sequence one value at a time
 
-A generator is a coroutine used as a pull-based sequence. The consumer asks for a value, the producer runs until `co_yield`, and then the producer suspends while the consumer observes the yielded value.
+Our counter prints inside the producer. A consumer should instead be able to ask for the next number and decide what to do with it. We will build that pull interface.
 
-## The transformation
+## 1. Ask the existing type to yield
 
-For a promise object `promise`:
-
-```cpp
-co_yield expression;
-```
-
-is defined in terms of:
+[01_missing_yield.cpp](labs/07/01_missing_yield.cpp) tries:
 
 ```cpp
-co_await promise.yield_value(expression);
+manual_job numbers() { co_yield 1; }
 ```
 
-`yield_value` usually stores the value and returns `std::suspend_always`. The consumer then reads the stored value before resuming the generator.
+```bash
+mkdir -p scratch
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/07/01_missing_yield.cpp -o scratch/generator
+```
 
-## A safe minimal design
+Expected: missing `yield_value` in the promise.
 
-The complete implementation is [`examples/generator.cpp`](examples/generator.cpp). Its promise has four important policies:
+You have seen this pattern with `return_void` and `return_value`: the keyword delegates behavior to the promise. Conceptually, `co_yield expression` awaits the result of `promise.yield_value(expression)`. It does not call `return_value` and it need not finish the coroutine.
+
+## 2. Store the value before suspending
+
+Copy the shape of `manual_job` into a `template<class T> class generator`. Keep lazy initial suspension, final suspension, move-only ownership, and `destroy()` in the destructor.
+
+In its promise, add `<optional>` storage and the new hook:
 
 ```cpp
-struct promise_type {
-    std::optional<T> current;
-    std::exception_ptr exception;
-
-    generator get_return_object() noexcept;
-    std::suspend_always initial_suspend() const noexcept { return {}; }
-    std::suspend_always final_suspend() const noexcept { return {}; }
-
-    std::suspend_always yield_value(T value) noexcept {
-        current.emplace(std::move(value));
-        return {};
-    }
-
-    void return_void() const noexcept {}
-    void unhandled_exception() noexcept {
-        exception = std::current_exception();
-    }
-};
+std::optional<T> current;
+std::suspend_always yield_value(T value) {
+    current.emplace(std::move(value));
+    return {};
+}
 ```
 
-- `initial_suspend = suspend_always` makes generation lazy.
-- `yield_value` publishes one value and suspends.
-- `final_suspend = suspend_always` keeps the state valid until the owning generator destroys it.
-- `unhandled_exception` stores failure for the consumer.
+`optional` starts empty; `T` need not be default-constructible. `yield_value` stores a value and returns a pause, so the consumer can examine the value while the producer is suspended.
 
-The consumer operation must check completion both before and after resumption:
+Notice the absence of `noexcept`. Constructing a general `T` in the optional can throw. Marking this unconditionally nonthrowing would turn an ordinary producer error into termination.
+
+Add `std::exception_ptr error` and change the exception hook to:
+
+```cpp
+void unhandled_exception() noexcept { error = std::current_exception(); }
+```
+
+We now have somewhere to retain producer failure for delivery to the consumer.
+
+## 3. Replace manual resume with `next()`
+
+The consumer must distinguish a yield from completion. Add:
 
 ```cpp
 bool next() {
-    if (!handle_ || handle_.done()) {
-        return false;
-    }
-
+    if (!handle_ || handle_.done()) return false;
+    handle_.promise().current.reset();
     handle_.resume();
-
-    if (handle_.promise().exception) {
-        std::rethrow_exception(handle_.promise().exception);
-    }
+    if (handle_.promise().error)
+        std::rethrow_exception(handle_.promise().error);
     return !handle_.done();
 }
 ```
 
-If the producer reaches final suspend without yielding, `next()` returns false. If it throws, `next()` rethrows.
+Why check twice? The first check avoids resuming a completed coroutine. The second detects whether that resume reached a yield or the end. Resetting the previous value makes the validity window explicit: advancing invalidates the current value before the producer runs again.
 
-## Why the original eager pattern is fragile
+Add `value()` that returns `const T&`, but throws `logic_error` if the owner is empty, complete, or has no current value. The complete type is [generator.hpp](labs/07/generator.hpp). Compare each addition with your version before running it.
 
-An eager generator (`initial_suspend = suspend_never`) can run and yield before the caller receives its return object. That can be made to work, but it makes `next()` semantics less intuitive. Worse, combining an owning handle with `final_suspend = suspend_never` leaves the owner holding a dangling handle at completion.
+`value()` is a borrow of promise storage. Copy it if you need to keep it across the next `next()` call or generator destruction. The state is retained at final suspend, but that does not make the last yielded value part of our API after completion.
 
-The conventional educational generator is lazy and suspends at final suspend.
+## 4. Replace printing with yielding
 
-## Value lifetime
-
-In this tutorial's generator, `value()` returns a reference to storage in the promise:
+[02_range.cpp](labs/07/02_range.cpp) is now almost ordinary loop code:
 
 ```cpp
-const T& value() const noexcept;
-```
-
-That reference is valid only until the next successful `next()` call or destruction of the generator. Consumers should copy it if they need a longer lifetime.
-
-Different designs let `yield_value` store a pointer/reference to an lvalue to avoid copies. Those designs require stronger lifetime rules and careful handling of rvalues. A value-storing promise is easier to teach safely.
-
-## Finite versus infinite generators
-
-```cpp
-generator<int> range(int first, int last) {
-    for (int value = first; value < last; ++value) {
-        co_yield value;
-    }
+generator<int> numbers() {
+    for (int n = 1; n <= 3; ++n) co_yield n;
 }
 ```
 
-Falling off this body is valid because the promise supplies `return_void()`. It transitions to final suspend, and the next consumer check reports completion.
+The consumer uses:
 
-An infinite generator, such as Fibonacci in the example, completes only when its owner destroys it. Destruction while suspended runs destructors for all live producer locals.
+```cpp
+auto values = numbers();
+while (values.next()) std::cout << values.value() << '\n';
+```
 
-## Iterator interfaces
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/07/02_range.cpp -o scratch/generator
+./scratch/generator
+```
 
-A production generator usually exposes `begin()`/`end()`:
+Expected:
 
-- `begin()` resumes to the first value;
-- increment resumes to the next value;
-- the sentinel compares against completion;
-- dereference reads the current promise value;
-- exceptions surface during `begin()` or increment.
+```text
+1
+2
+3
+done: 1
+```
 
-Such iterators are normally single-pass input iterators. Copying an iterator does not create an independent traversal, because both would refer to one coroutine state.
+The last line comes from another `next()` after completion. It returns false without resuming. Falling off the producer body is valid because this promise has `return_void()`.
 
-## `co_yield` plus `co_await`
+Change the loop bound to zero. Expect only `done: 1`; an empty generator is a valid sequence. Then call `value()` before the first successful `next()` inside a try/catch. Expect our diagnostic rather than an invalid optional dereference.
 
-A coroutine promise may support both operations, but a normal pull generator has no scheduler to complete arbitrary asynchronous waits. Combining them changes the abstraction into an asynchronous generator and requires answers for:
+## 5. Make the producer fail after one value
 
-- how the consumer awaits the next value;
-- how producer and consumer lifetimes are linked;
-- how cancellation wakes a suspended producer;
-- which executor resumes each side;
-- how backpressure works.
+[03_failure.cpp](labs/07/03_failure.cpp) yields `1`, then throws `runtime_error{"producer failed"}`:
 
-Do not add arbitrary async awaits to a synchronous generator type and assume the consumer's `next()` remains valid.
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/07/03_failure.cpp -o scratch/generator
+./scratch/generator
+```
 
-## Exercise
+Expected:
 
-1. Replace Fibonacci with a finite `range` generator.
-2. Throw after yielding three values and observe where the exception appears.
-3. Add a destructor-logging local before the loop and destroy the generator early.
-4. Explain why calling `value()` before a successful `next()` violates the API contract.
+```text
+1
+producer failed
+```
 
-Next: [Lesson 8 — Creating Awaitables](08_creating_awaitables.md)
+The second `next()` resumes the producer, which stores the exception and reaches final suspend. `next()` then rethrows it in the consumer. This is our first complete exception-transport path. A `co_await` on a task will later do the analogous check in `await_resume()`.
+
+Do not retry this failed sequence expecting the producer to restart. It has completed exceptionally; a new call creates a new sequence.
+
+## 6. Stop consuming before the producer finishes
+
+In a local copy, add Lesson 3's destructor-logging guard before the loop. Call `next()` only once, read the value, and let the generator leave scope.
+
+Expected: the guard's destructor runs during owner destruction; the loop's remaining iterations do not run. There are no external registrations, so abandoning this suspended producer is straightforward.
+
+A conceptually infinite sequence also depends on this cleanup path. Choose a progression that does not introduce signed overflow; an unbounded signed Fibonacci loop eventually has undefined behavior even if coroutine ownership is correct. Our default example is finite.
+
+## 7. Prevent an operation our pull interface cannot drive
+
+The saved promise declares:
+
+```cpp
+template<class A> void await_transform(A&&) = delete;
+```
+
+Try adding `co_await std::suspend_always{};` before the first yield. Compilation should fail on the deleted transformation. Restore the file afterward.
+
+Why prohibit it? `next()` assumes one resume either produces a value or finishes. An arbitrary timer/I/O pause could return with neither a value nor completion. An async generator needs an awaitable next operation, linked producer/consumer lifetimes, cancellation, and an executor contract. Our synchronous interface cannot silently become one.
+
+`co_yield` still works because its implicit await bypasses ordinary `await_transform`, as you observed in Lesson 6. Initial and final suspension also continue to work.
+
+## Extend the consumer interface without changing the engine
+
+A `begin()` could call `next()` once; iterator increment could call it again; dereference could call `value()`; an end sentinel could reflect completion. A real iterator interface must meet the required iterator concepts. This sequence is single-pass: copying an iterator would still refer to the same producer, not create a second traversal. Exceptions would appear during `begin()` or increment.
+
+Reference-yielding designs avoid some copies by borrowing the producer's value. They need a stronger lifetime contract for both lvalues and temporaries. We keep owned promise values so the capstone can pull file lines safely.
+
+**Checkpoint:** explain the difference between the producer's local `n`, the promise's current value, and the consumer's copied value. Then explain who controls the rate of production. Here the consumer does: one request permits one value. That is the simplest form of backpressure.
+
+```bash
+python3 tools/check_labs.py 07
+```
+
+Next: [Lesson 8 — Arrange a future resume](08_creating_awaitables.md).

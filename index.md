@@ -1,42 +1,36 @@
 ---
-title: "C++20 Coroutines Tutorial"
-description: "Learn C++20 coroutine syntax, lifecycle, frames, awaiters, generators, task composition, cancellation, ownership, and safe production patterns."
+title: "C++20 Coroutines: Learn by Building"
+description: "A hands-on C++20 coroutine workshop: start with compiler errors and build generators, tasks, an event loop, cancellation, and a bounded data-processing application."
 keywords:
-  - C++20 coroutines tutorial
-  - learn C++ coroutines
-  - C++ async programming
-  - co_await tutorial
-  - C++ generator
+  - hands-on C++20 coroutines
+  - co_return compiler errors
+  - coroutine workshop
 seo:
   type: WebSite
 permalink: /
 ---
 
-# C++20 Coroutines Tutorial
+# Learn coroutines with an editor and a compiler
 
-Learn C++20 coroutines from the language mechanics through safe task composition. The tutorial distinguishes coroutines, awaiters, and runtimes, then makes frame ownership, lifetime, exception, cancellation, and scheduling rules explicit.
+Write `void hello() { co_return; }` and compile it. It fails. Fix that error, compile again, and discover the next requirement. That is how this twelve-lesson workshop starts.
 
-## Start learning
+Later you will investigate programs that compile but never start, children that finish without resuming their parent, and references that outlive the objects they refer to. Each experiment introduces the concept needed to explain and repair what you observed.
 
-1. [What are coroutines?](01_what_are_coroutines.md)
-2. [Why coroutines?](02_why_coroutines.md)
-3. [Coroutine lifecycle](03_coroutine_lifecycle.md)
-4. [Coroutine state, storage, and lifetime](04_coroutine_frame.md)
-5. [Suspension and resumption](05_suspension_resumption.md)
-6. [`co_await` mechanics](06_coawait_mechanics.md)
-7. [`co_yield` and generators](07_coyield_generators.md)
-8. [Creating awaitables](08_creating_awaitables.md)
-9. [Creating a `task<T>`](09_creating_coroutine_types.md)
-10. [`std::coroutine_handle` and ownership](10_coroutine_handle.md)
-11. [Exceptions, cleanup, and cancellation](11_exception_handling.md)
-12. [Practical coroutine design](12_practical_patterns.md)
+The destination is a small file-processing application built from your own generator, task, event loop, and cancellation checks. Every lesson includes commands, saved code checkpoints, expected observations, and experiments with explained outcomes.
 
-The [learning roadmap](00_ROADMAP.md) suggests checkpoints and experiments. Complete, compilable examples live in the [`examples/`](examples/) directory.
+## Follow the workshop
 
-## What you will understand
+1. [Make `co_return` compile](01_what_are_coroutines.md)
+2. [Pause, resume, and retain local state](02_why_coroutines.md)
+3. [Trace creation and cleanup](03_coroutine_lifecycle.md)
+4. [Repair lifetime assumptions](04_coroutine_frame.md)
+5. [Build an awaiter](05_suspension_resumption.md)
+6. [Adapt an awaitable](06_coawait_mechanics.md)
+7. [Pull values from a generator](07_coyield_generators.md)
+8. [Arrange the next resume](08_creating_awaitables.md)
+9. [Compose result-bearing tasks](09_creating_coroutine_types.md)
+10. [Repair queued-handle ownership](10_coroutine_handle.md)
+11. [Handle errors and cancellation](11_exception_handling.md)
+12. [Build a bounded reading report](12_practical_patterns.md)
 
-- How the compiler selects `promise_type` and transforms a coroutine.
-- How `await_ready`, `await_suspend`, and `await_resume` control suspension.
-- Why coroutine handles are non-owning and when `destroy()` is valid.
-- How generators and lazy `task<T>` types work.
-- How exceptions, cancellation, schedulers, callback races, and structured concurrency affect production code.
+Begin with [Lesson 1](01_what_are_coroutines.md). Keep the [roadmap and concept coverage map](00_ROADMAP.md) nearby. The [checkpoint guide](labs/README.md) explains how to recover a step and verify your progress.

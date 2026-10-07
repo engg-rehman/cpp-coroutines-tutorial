@@ -1,6 +1,6 @@
 ---
-title: "C++ Coroutine Frame, Storage, and Lifetime"
-description: "Learn what a C++ coroutine frame contains, when allocation can be elided, and how parameters, locals, this, and lambda captures can dangle."
+title: "Lesson 4: Repair a Lifetime Assumption"
+description: "Use delayed execution to expose borrowed state, repair parameter and closure lifetimes, and inspect coroutine allocation."
 keywords:
   - C++ coroutine frame
   - coroutine allocation elision
@@ -11,170 +11,161 @@ seo:
   type: TechArticle
 ---
 
-# Lesson 4: Coroutine State, Storage, and Lifetime
+# Lesson 4: Discover what survives suspension
 
-## What the coroutine state contains
+Our coroutine keeps a local counter alive. Does it also preserve everything passed to the function? Let's try to print a snapshot of a string and find out.
 
-The implementation creates a coroutine state containing whatever is needed to suspend and resume correctly. It normally includes:
+## 1. Make a prediction that the program disproves
 
-- the promise object;
-- copies of parameters;
-- local variables and temporaries whose lifetimes cross suspension;
-- the current suspension/resume state;
-- implementation-specific resume and destroy information.
-
-“Coroutine frame” is the common informal name for this state and its storage.
-
-There is no portable C++ struct layout for a frame. The promise is not guaranteed to be first, the resume state need not be an integer, and fields need not follow source declaration order. Do not inspect offsets or use `sizeof(promise_type)` as the frame size.
-
-## Dynamic allocation is not guaranteed
-
-The abstract coroutine machinery can request dynamic storage through an allocation function. However, the compiler may elide that allocation and embed the state in the caller's storage when it can prove that:
-
-- the coroutine state's lifetime is strictly nested within the caller's lifetime; and
-- the required size is known at the call site.
-
-This is sometimes called the **coroutine allocation elision optimization**. It can occur even if promise-specific `operator new` has observable behavior, so allocation logging is a useful experiment, not a semantic guarantee.
-
-Avoid saying that every coroutine is heap allocated. Also avoid saying that suspension “returns the function's stack.” Suspension transfers control; the compiler-managed state outlives the activation that initiated the call.
-
-## Which locals occupy the state?
-
-Consider:
+Open [01_borrow.cpp](labs/04/01_borrow.cpp):
 
 ```cpp
-task<int> example() {
-    int before = expensive_calculation();
-    consume(before);
-
-    int across = 7;
-    co_await operation();
-    co_return across;
+manual_job print_later(const std::string& text) {
+    std::cout << text << '\n';
+    co_return;
 }
 ```
 
-`across` must survive the suspension. `before` does not need to, because its last use precedes suspension. Optimizers can shorten lifetimes, reuse storage, inline awaiters, and remove values entirely.
+`main` creates `text = "original"`, calls `print_later(text)`, assigns `"changed"` to the string, and only then resumes the coroutine.
 
-Scope objects still follow normal RAII rules. If a lock guard's scope crosses `co_await`, the lock remains held while the coroutine is suspended—usually a serious bug.
-
-```cpp
-std::unique_lock lock(mutex);
-co_await network_read(); // generally wrong: suspension duration is unbounded
+```bash
+mkdir -p scratch
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/04/01_borrow.cpp -o scratch/lifetime
+./scratch/lifetime
 ```
 
-Finish the protected operation and release the lock before awaiting.
+Expected output:
 
-## Parameter-copy rules
+```text
+changed
+```
 
-At invocation, the coroutine creates a frame-resident copy corresponding to every parameter:
+The frame retained a reference to the original string, not a snapshot of its contents. The referent is still alive, so this is a safe experiment with a surprising result. It exposes the ownership assumption without relying on a crash.
 
-- for a non-reference parameter, the copy is initialized from an xvalue referring to the original parameter, so a move may occur;
-- for a reference parameter, the copy is still a reference bound to the same object.
+## 2. Fix the snapshot requirement with a value parameter
 
-Therefore this is potentially unsafe:
+Change the parameter to `std::string text`. Build the saved repair:
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/04/02_own.cpp -o scratch/lifetime
+./scratch/lifetime
+```
+
+Expected:
+
+```text
+original
+```
+
+The caller initializes a value parameter, and the coroutine machinery creates the frame-resident parameter copy. A non-reference parameter copy is initialized from an xvalue referring to the parameter, which permits moving its resources. A reference parameter remains a reference to the same object. Copy elision and optimization can affect which constructor calls you observe; the ownership difference remains.
+
+A borrowed reference is fine when the caller guarantees its lifetime and wants shared observation. It is wrong for this snapshot requirement.
+
+## 3. Find the dangerous version before executing it
+
+With the original reference parameter, consider this **unsafe edit, not a runnable checkpoint**:
 
 ```cpp
-task<void> print_later(const std::string& text) {
-    co_await schedule();
-    std::cout << text; // text may refer to a destroyed object
+auto owner = print_later(std::string{"temporary"});
+owner.resume(); // The string died at the preceding semicolon.
+```
+
+The returned owner preserves the frame, but the frame's reference does not preserve the temporary. Accessing it on resume is undefined behavior. It may print the expected text, garbage, or appear to work until optimization changes. The language does not promise a diagnostic.
+
+Use the value-parameter version for this call. When deliberately investigating the unsafe variant in a separate local copy, AddressSanitizer can help find the misuse:
+
+```bash
+clang++ -std=c++20 -g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer scratch/lifetime.cpp -o scratch/lifetime
+```
+
+A sanitizer failure is evidence of a bug; a clean run does not prove a borrowed lifetime is valid. The regular checkpoint suite never executes undefined behavior.
+
+## 4. Apply the same reasoning to a lambda
+
+This is also **unsafe** if the coroutine later reads the capture:
+
+```cpp
+auto owner = [text = std::string{"hello"}]() -> manual_job {
+    std::cout << text << '\n';
+    co_return;
+}();
+owner.resume();
+```
+
+The temporary closure owns `text`. Calling the closure does not automatically move its captures into the coroutine frame. The coroutine may keep access through the closure's implicit object parameter, and the closure is gone at the first semicolon.
+
+[03_closure.cpp](labs/04/03_closure.cpp) repairs it by using a captureless coroutine lambda with an explicit value parameter. It also shows a named free function accepting a value:
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/04/03_closure.cpp -o scratch/lifetime
+./scratch/lifetime
+```
+
+Expected:
+
+```text
+parameter survives
+named function survives
+```
+
+Another valid repair is to keep a named closure alive until its coroutine completes. Choose the design whose ownership is easiest to see.
+
+A member coroutine has the same underlying risk: calling `session.run()` does not copy `session` into the frame. `this` must remain valid. A parent scope can own both objects; a shared-ownership design can explicitly retain the session, but must avoid reference cycles. Taking a `shared_ptr<session>` **by value** in a free coroutine makes that retention visible.
+
+## 5. Inspect what the frame must retain
+
+Add these locals to a copy of Lesson 2's coroutine:
+
+```cpp
+int used_before = 7;
+std::cout << used_before << '\n';
+int used_after = 9;
+co_await std::suspend_always{};
+std::cout << used_after << '\n';
+```
+
+`used_after` must remain available after suspension. `used_before` no longer needs storage for later execution. The compiler may fold either constant away. Do not conclude that every source local occupies a fixed frame slot.
+
+In general, retained state includes the promise, parameter copies, necessary locals and temporaries, awaiters, and resume/destroy bookkeeping. No portable offsets or struct layout are specified. `sizeof(promise_type)` measures the promise object, not the whole frame.
+
+Now replace a local with a destructor-logging guard and observe Lesson 3's rule: its lifetime follows its scope. A lock guard therefore stays locked if its scope crosses suspension. Reduce the locked scope before awaiting. Resuming later on another thread can additionally violate a mutex's ownership rules.
+
+## 6. Ask the allocator what this compiler does
+
+Copy `labs/02/manual_job.hpp` to `scratch/manual_job.hpp` and `labs/02/03_resume.cpp` to `scratch/allocation.cpp`. Add `<cstddef>`, `<cstdio>`, and `<new>` to the copied header. Add this inside its `promise_type`:
+
+```cpp
+static void* operator new(std::size_t bytes) {
+    std::printf("allocate %zu bytes\n", bytes);
+    return ::operator new(bytes);
 }
-
-auto work = print_later(std::string{"temporary"});
-```
-
-Passing by value makes the string object part of the coroutine state:
-
-```cpp
-task<void> print_later(std::string text) {
-    co_await schedule();
-    std::cout << text;
+static void operator delete(void* memory, std::size_t bytes) noexcept {
+    std::printf("release %zu bytes\n", bytes);
+    ::operator delete(memory);
 }
 ```
 
-“Always pass by value” is too broad: a reference is valid if the referent is guaranteed to outlive the coroutine. The important requirement is an explicit lifetime relationship.
+Compile at two optimization levels:
 
-## The implicit `this` trap
-
-A non-static member coroutine retains the implicit object parameter as a pointer-like reference; it does not copy the object.
-
-```cpp
-struct session {
-    task<void> run() {
-        co_await read_request();
-        use_member_data(); // *this must still be alive
-    }
-};
+```bash
+clang++ -std=c++20 -O0 scratch/allocation.cpp -o scratch/allocation-debug
+./scratch/allocation-debug
+clang++ -std=c++20 -O2 scratch/allocation.cpp -o scratch/allocation-release
+./scratch/allocation-release
 ```
 
-Destroying `session` while `run()` is suspended makes later member access invalid. Common solutions are structured ownership, a task owned by the object, or deliberately retaining shared ownership. Blindly capturing a `shared_ptr` can also create cycles, so document the design.
+There is deliberately no expected byte count. If allocation happens, the hooks reveal the requested storage. The compiler can omit coroutine allocation, including observable custom allocation calls, when it can establish the required nesting and size conditions. No allocation print is a possible outcome. An implementation can embed storage in the caller; a coroutine is not guaranteed to allocate on the heap.
 
-## Coroutine lambdas and captures
+Add a large nontrivial local used after suspension and compare. Record compiler, optimization flags, observed allocations, and bytes. Avoid making portable performance claims from one run.
 
-Immediately invoking a capturing coroutine lambda is a notorious lifetime trap:
+For a specialized allocator, a promise allocation overload may accept the coroutine arguments after the size parameter. Those arguments must match the selected signature, and deallocation and construction-failure cleanup must agree. This is more than replacing one `new` expression in the body.
 
-```cpp
-auto task = [value = std::string{"hello"}]() -> task<void> {
-    co_await schedule();
-    std::cout << value;
-}(); // closure temporary can die while the coroutine keeps a `this` pointer
+A promise can also declare `get_return_object_on_allocation_failure()`. Then the selected allocation path must be nonthrowing; a null allocation result returns the hook's sentinel object without executing the body. For our owner, a possible sentinel is `manual_job{handle_type{}}`, and its `resume()` returns false. Test this policy in an isolated copy using a matching `noexcept` allocation function; optimizers may elide allocation, so a forced-null experiment is not a portable guarantee of taking that path.
+
+**Checkpoint:** explain separately where the state is stored, who destroys it, and which referenced objects it does not own. Those are three different questions.
+
+```bash
+python3 tools/check_labs.py 04
 ```
 
-The captures belong to the lambda closure, not automatically to the coroutine state. Prefer a named/free coroutine that takes values as parameters:
-
-```cpp
-task<void> print_after_schedule(std::string value) {
-    co_await schedule();
-    std::cout << value;
-}
-```
-
-Or ensure the closure itself outlives the coroutine.
-
-## Custom allocation
-
-The promise type can provide allocation functions used for the coroutine state:
-
-```cpp
-struct promise_type {
-    static void* operator new(std::size_t bytes) {
-        return ::operator new(bytes);
-    }
-
-    static void operator delete(void* pointer, std::size_t bytes) noexcept {
-        ::operator delete(pointer, bytes);
-    }
-};
-```
-
-Placement forms can receive leading coroutine arguments when their signatures match, which enables allocator-aware designs. Such designs must align deallocation, promise construction failure, and argument lifetimes correctly; use an established implementation as a reference.
-
-If the promise declares:
-
-```cpp
-static task get_return_object_on_allocation_failure() noexcept;
-```
-
-the coroutine uses a non-throwing allocation path and returns that object on failure. This hook changes creation semantics and should be tested explicitly.
-
-## Ownership versus storage
-
-These are independent questions:
-
-- **Where is the state stored?** Chosen by the compiler/allocation protocol.
-- **Who controls its lifetime?** Chosen by the coroutine abstraction.
-
-An RAII return object can own a handle regardless of whether allocation was ultimately elided. Calling `handle.destroy()` invokes the correct generated destroy path; user code does not directly free frame memory.
-
-## Measuring instead of guessing
-
-To investigate a real implementation:
-
-1. build optimized and unoptimized variants;
-2. log promise allocation calls, while remembering they may be elided;
-3. inspect compiler coroutine lowering or assembly;
-4. benchmark allocation rate, peak outstanding states, scheduler operations, and cache behavior;
-5. repeat after changing which locals cross suspension.
-
-Frame sizes such as “100–500 bytes” are anecdotes, not portable facts.
-
-Next: [Lesson 5 — Suspension and Resumption](05_suspension_resumption.md)
+Next: [Lesson 5 — Build an awaiter by fixing compiler errors](05_suspension_resumption.md).

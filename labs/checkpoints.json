@@ -1,0 +1,226 @@
+[
+  {
+    "source": "labs/01/01_void.cpp",
+    "error": "promise_type|coroutine_traits"
+  },
+  {
+    "source": "labs/01/02_empty_promise.cpp",
+    "error": "get_return_object|initial_suspend|final_suspend|return_void|unhandled_exception"
+  },
+  {
+    "source": "labs/01/03_return_object.cpp",
+    "error": "get_return_object|initial_suspend|final_suspend|return_void|unhandled_exception"
+  },
+  {
+    "source": "labs/01/04_initial_suspend.cpp",
+    "error": "get_return_object|initial_suspend|final_suspend|return_void|unhandled_exception"
+  },
+  {
+    "source": "labs/01/05_final_suspend.cpp",
+    "error": "get_return_object|initial_suspend|final_suspend|return_void|unhandled_exception"
+  },
+  {
+    "source": "labs/01/06_return_void.cpp",
+    "error": "get_return_object|initial_suspend|final_suspend|return_void|unhandled_exception"
+  },
+  {
+    "source": "labs/01/07_hello.cpp",
+    "stdout": "hello\n"
+  },
+  {
+    "source": "labs/02/01_repeat.cpp",
+    "stdout": "1\n1\n"
+  },
+  {
+    "source": "labs/02/02_forgot_start.cpp",
+    "stdout": "main finished\n"
+  },
+  {
+    "source": "labs/02/03_resume.cpp",
+    "stdout": "1\nmain: other work\n2\ndone: 1\n"
+  },
+  {
+    "source": "labs/02/04_interleave.cpp",
+    "stdout": "A1\nB1\nA2\nB2\n"
+  },
+  {
+    "source": "labs/03/01_finish.cpp",
+    "stdout": "main: call\npromise: construct\npromise: return object\npromise: initial_suspend\nmain: resume 1\nlocal: construct\nbody: first\nmain: resume 2\nbody: last\npromise: return_void\nlocal: destroy\npromise: final_suspend\nmain: leave\nowner: destroy frame\npromise: destroy\n"
+  },
+  {
+    "source": "labs/03/02_abandon.cpp",
+    "stdout": "main: call\npromise: construct\npromise: return object\npromise: initial_suspend\nmain: resume 1\nlocal: construct\nbody: first\nmain: leave\nowner: destroy frame\nlocal: destroy\npromise: destroy\n"
+  },
+  {
+    "source": "labs/04/01_borrow.cpp",
+    "stdout": "changed\n"
+  },
+  {
+    "source": "labs/04/02_own.cpp",
+    "stdout": "original\n"
+  },
+  {
+    "source": "labs/04/03_closure.cpp",
+    "stdout": "parameter survives\nnamed function survives\n"
+  },
+  {
+    "source": "labs/05/01_missing_ready.cpp",
+    "error": "await_ready"
+  },
+  {
+    "source": "labs/05/02_missing_suspend.cpp",
+    "error": "await_suspend"
+  },
+  {
+    "source": "labs/05/03_missing_resume.cpp",
+    "error": "await_resume"
+  },
+  {
+    "source": "labs/05/04_pause.cpp",
+    "stdout": "after\n"
+  },
+  {
+    "source": "labs/05/05_paths.cpp",
+    "stdout": "start\nready\nresume\nvalue: 42\nback in main\nstart\nready\nsuspend\nresume\nvalue: 42\nback in main\nstart\nready\nsuspend\nback in main\nresume\nvalue: 42\n"
+  },
+  {
+    "source": "labs/06/01_not_awaitable.cpp",
+    "error": "await_ready|not a structure|not a class|member reference"
+  },
+  {
+    "source": "labs/06/02_conversion.cpp",
+    "stdout": "member conversion\nready\nresult\n42\n"
+  },
+  {
+    "source": "labs/06/03_transform.cpp",
+    "stdout": "transform\nmember conversion\nready\nresult\n42\n"
+  },
+  {
+    "source": "labs/06/04_restricted.cpp",
+    "error": "convert|conversion|await_transform"
+  },
+  {
+    "source": "labs/06/05_forward.cpp",
+    "stdout": "free conversion\nready\nresult\n7\n"
+  },
+  {
+    "source": "labs/07/01_missing_yield.cpp",
+    "error": "yield_value"
+  },
+  {
+    "source": "labs/07/02_range.cpp",
+    "stdout": "1\n2\n3\ndone: 1\n"
+  },
+  {
+    "source": "labs/07/03_failure.cpp",
+    "stdout": "1\nproducer failed\n"
+  },
+  {
+    "source": "labs/08/01_stalled.cpp",
+    "stdout": "A\nmain\ndone before pumping: 0\nB\n"
+  },
+  {
+    "source": "labs/08/02_loop.cpp",
+    "stdout": "A\nmain\nB\ndone: 1\n"
+  },
+  {
+    "source": "labs/08/03_callback.cpp",
+    "stdout": "value: 42\nback in main\nback in main\nvalue: 42\nlate callback ignored\n"
+  },
+  {
+    "source": "labs/09/01_missing_return_value.cpp",
+    "error": "return_value"
+  },
+  {
+    "source": "labs/09/02_value.cpp",
+    "stdout": "42\n"
+  },
+  {
+    "source": "labs/09/03_cannot_await.cpp",
+    "error": "await_ready"
+  },
+  {
+    "source": "labs/09/04_lost_parent.cpp",
+    "stdout": "child finished\ntask needs an external scheduler\n"
+  },
+  {
+    "source": "labs/09/05_chain.cpp",
+    "stdout": "child\nparent\n43\nvoid task\ntask already started\n"
+  },
+  {
+    "source": "labs/10/01_copy_owner.cpp",
+    "error": "deleted"
+  },
+  {
+    "source": "labs/10/02_handles.cpp",
+    "stdout": "same state: 1\nbody\ndone: 1\n"
+  },
+  {
+    "source": "labs/10/03_unregister.cpp",
+    "stdout": "cleanup\nqueue empty: 1\nfinished\ncleanup\n"
+  },
+  {
+    "source": "labs/11/01_errors.cpp",
+    "stdout": "parent caught: read failed\nresult: -1\n"
+  },
+  {
+    "source": "labs/11/02_await_in_catch.cpp",
+    "error": "handler|catch"
+  },
+  {
+    "source": "labs/11/03_async_cleanup.cpp",
+    "stdout": "cleanup awaited\nread failed\n"
+  },
+  {
+    "source": "labs/11/04_cancel.cpp",
+    "stdout": "item 1\nstop requested\ncleanup\ncancelled\nqueue empty: 1\n"
+  },
+  {
+    "source": "labs/12/01_report.cpp",
+    "stdout": "start 1\nstart 2\nfinish 1\nfinish 2\nstart 3\nstart 4\nfinish 4\nreject: invalid reading\nstart 5\nfinish 5\naccepted=4 rejected=1 cancelled=0 total=100\n",
+    "args": [
+      "labs/12/readings.txt",
+      "2"
+    ]
+  },
+  {
+    "source": "labs/12/01_report.cpp",
+    "name": "report_bad_width",
+    "args": [
+      "labs/12/readings.txt",
+      "0"
+    ],
+    "stdout": "",
+    "stderr": "width must be 1..8\n",
+    "exit": 1
+  },
+  {
+    "source": "labs/12/01_report.cpp",
+    "name": "report_cancel",
+    "args": [
+      "labs/12/readings.txt",
+      "2",
+      "cancel"
+    ],
+    "stdout": "start 1\nstart 2\naccepted=0 rejected=0 cancelled=2 total=0\n"
+  },
+  {
+    "source": "labs/12/01_report.cpp",
+    "name": "report_missing_input",
+    "args": [
+      "labs/12/does-not-exist.txt"
+    ],
+    "stdout": "",
+    "stderr": "cannot open input\n",
+    "exit": 1
+  },
+  {
+    "source": "labs/12/01_report.cpp",
+    "name": "report_sequential",
+    "args": [
+      "labs/12/readings.txt",
+      "1"
+    ],
+    "stdout": "start 1\nfinish 1\nstart 2\nfinish 2\nstart 3\nreject: invalid reading\nstart 4\nfinish 4\nstart 5\nfinish 5\naccepted=4 rejected=1 cancelled=0 total=100\n"
+  }
+]

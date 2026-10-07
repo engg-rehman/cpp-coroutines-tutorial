@@ -1,6 +1,6 @@
 ---
-title: "C++ Coroutine Lifecycle Explained"
-description: "Trace a C++20 coroutine from state creation and initial_suspend through execution, final_suspend, exceptions, and frame destruction."
+title: "Lesson 3: Trace the Coroutine Lifecycle"
+description: "Instrument the coroutine you built and compare lazy start, normal completion, and abandonment."
 keywords:
   - C++ coroutine lifecycle
   - initial_suspend
@@ -11,153 +11,129 @@ seo:
   type: TechArticle
 ---
 
-# Lesson 3: Coroutine Lifecycle
+# Lesson 3: Find out when things actually happen
 
-The standard specifies operations and control transfers, not a formal list of lifecycle “states.” A useful mental model is:
+We have an owner, a promise, a local counter, and two kinds of suspension. It is tempting to say “the function returns, so everything is destroyed.” Let's make that claim fail visibly.
 
-```text
-create state
-  -> obtain return object
-  -> initial await
-  -> run / suspend / resume (zero or more times)
-  -> store result or exception
-  -> final await
-  -> destroy state
-```
+## 1. Instrument the program before changing its behavior
 
-## 1. Invocation and state creation
+Open [traced_job.hpp](labs/03/traced_job.hpp). It is Lesson 2's owner with a print in each promise hook, the promise constructor/destructor, and the owner's destroy path. Start by adding the same prints to your own copy.
 
-Calling a coroutine first creates its coroutine state. Conceptually, the implementation:
-
-1. obtains storage, unless allocation is elided;
-2. creates a copy for every parameter;
-3. constructs the promise object;
-4. calls `promise.get_return_object()`;
-5. evaluates `co_await promise.initial_suspend()`.
-
-These steps precede the user's function body. The caller receives the return object either when initial suspension occurs or when eager execution later suspends/completes.
-
-The return object and promise are different objects. The return object is usually a small owner containing a handle; the promise lives in the coroutine state.
-
-## 2. Initial suspend: lazy or eager start
+[01_finish.cpp](labs/03/01_finish.cpp) adds a local object:
 
 ```cpp
-std::suspend_always initial_suspend() noexcept; // lazy
-std::suspend_never  initial_suspend() noexcept; // eager
-```
-
-- A lazy coroutine returns to its caller before running user code. A consumer or scheduler must resume it.
-- An eager coroutine starts inside the call and returns only when it first suspends or completes.
-
-Neither policy is universally “most common.” Generators and many composable task types are lazy; event handlers and some task types are eager.
-
-## 3. Running and ordinary suspension
-
-While running, a coroutine is executing an ordinary instruction stream. At a `co_await`, it may suspend. If it does, the coroutine state retains the resume location and every object whose lifetime crosses that point.
-
-Later, some code may call `resume()` on a handle. Resumption first completes the suspended await-expression by evaluating `await_resume()`, then continues the body.
-
-Do not call `resume()` merely because you have a handle. Its preconditions require a suspended coroutine that is not at final suspend. Resuming a running or completed coroutine is undefined behavior.
-
-## 4. Normal completion
-
-```cpp
-co_return value; // calls promise.return_value(value)
-co_return;       // calls promise.return_void()
-```
-
-After the appropriate promise method finishes, local variables are destroyed and execution proceeds to the final await. An ordinary `return` statement is forbidden in a coroutine.
-
-## 5. Exceptional completion
-
-An exception escaping the user body is caught by the generated machinery and passed to:
-
-```cpp
-promise.unhandled_exception();
-```
-
-A result-bearing task normally stores `std::current_exception()` in the promise. Its awaiter rethrows from `await_resume()`, making the exception appear at the awaiting coroutine's `co_await` expression.
-
-The exception does not automatically cross the coroutine boundary. A promise that swallows it has chosen to lose it; a promise that calls `std::terminate()` has chosen a fire-and-forget policy.
-
-## 6. Final suspend
-
-Every completed coroutine evaluates:
-
-```cpp
-co_await promise.final_suspend();
-```
-
-The final await-expression must not be potentially throwing, so `final_suspend()` and its awaiter operations are normally `noexcept`. Common policies:
-
-- `suspend_always`: retain the completed state until its owner destroys it;
-- a custom final awaiter: resume a stored continuation, usually by returning its handle;
-- `suspend_never`: do not retain the state; it is destroyed as completion finishes.
-
-The last policy is dangerous if a return object still stores a handle: that handle becomes dangling as soon as the coroutine completes. Owning task examples in this tutorial therefore suspend at final suspend.
-
-A coroutine suspended at final suspend is done. It may be inspected or destroyed, but never resumed.
-
-## 7. Destruction
-
-Calling `handle.destroy()` on a suspended coroutine:
-
-1. destroys objects whose lifetimes remain in the coroutine state;
-2. destroys the promise;
-3. destroys parameter copies;
-4. releases the coroutine-state storage when needed.
-
-Destroying a suspended coroutine before completion is allowed and represents abandonment. The owner must first ensure no callback, queue, timer, or other thread can later resume the old handle.
-
-Destroying a running coroutine is undefined behavior.
-
-## The ownership pattern
-
-An owning return object should be move-only:
-
-```cpp
-class owner {
-    std::coroutine_handle<promise_type> handle_{};
-
-public:
-    owner(const owner&) = delete;
-    owner& operator=(const owner&) = delete;
-
-    owner(owner&& other) noexcept
-        : handle_(std::exchange(other.handle_, {})) {}
-
-    ~owner() {
-        if (handle_) {
-            handle_.destroy();
-        }
-    }
+struct guard {
+    guard() { std::cout << "local: construct\n"; }
+    ~guard() { std::cout << "local: destroy\n"; }
 };
 ```
 
-If an owner were copyable, two destructors could destroy the same state. A defaulted move constructor is also insufficient for `coroutine_handle`, because copying a handle does not clear the source.
+Its coroutine constructs `guard local`, prints `body: first`, pauses, prints `body: last`, and explicitly executes `co_return;`. Before running, write down where you expect the local destructor and promise destructor to appear.
 
-## Failure during creation
+```bash
+mkdir -p scratch
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/03/01_finish.cpp -o scratch/lifecycle
+./scratch/lifecycle
+```
 
-There are several distinct cases:
+Expected output:
 
-- If ordinary coroutine-state allocation throws, the exception reaches the caller.
-- A promise may define `get_return_object_on_allocation_failure()`. That selects a non-throwing allocation path and lets the call return a sentinel object instead.
-- If constructing a parameter copy or the promise throws, already-created objects are destroyed, storage is released, and the exception reaches the caller.
-- Failure while entering the initial await, before its `await_resume()` begins, also reaches the caller rather than being sent to `unhandled_exception()`.
+```text
+main: call
+promise: construct
+promise: return object
+promise: initial_suspend
+main: resume 1
+local: construct
+body: first
+main: resume 2
+body: last
+promise: return_void
+local: destroy
+promise: final_suspend
+main: leave
+owner: destroy frame
+promise: destroy
+```
 
-These creation failures occur before there is a normally usable coroutine return object.
+## 2. Explain the two different lifetimes
 
-## Trace the checked example
+The body local exists from its declaration until the body completes. It survives the ordinary pause. It is destroyed **before** final suspension.
 
-In [`examples/manual_task.cpp`](examples/manual_task.cpp):
+The promise remains in the frame at final suspension. Only the owner's destructor destroys that completed frame. Thus “done” and “destroyed” are separate events. This distinction lets a future `task<int>` leave its result in the promise until the consumer reads it.
 
-1. the call creates an eager coroutine;
-2. it prints `coroutine: start`;
-3. `suspend_always` suspends it;
-4. `main` calls the owner's safe `resume()` wrapper;
-5. the coroutine finishes and suspends at final suspend;
-6. the owner's destructor calls `destroy()`.
+The actual creation sequence includes work before these prints: obtain state storage if required, construct parameter copies, then construct the promise. The promise constructor may accept arguments corresponding to the coroutine's parameters; otherwise the machinery uses the available default construction path. `get_return_object()` happens before initial suspension, which is why the caller receives an owner even when the body has not run.
 
-Add logging to `get_return_object`, `initial_suspend`, `return_void`, `final_suspend`, and the promise destructor to see the exact order.
+The frame, promise, and return object are not interchangeable names. Locate all three in the code rather than memorizing definitions.
 
-Next: [Lesson 4 — The Coroutine Frame](04_coroutine_frame.md)
+## 3. Remove the second resume
+
+Build [02_abandon.cpp](labs/03/02_abandon.cpp):
+
+```bash
+clang++ -std=c++20 -Wall -Wextra -Wpedantic labs/03/02_abandon.cpp -o scratch/lifecycle
+./scratch/lifecycle
+```
+
+Everything through `body: first` is the same. The ending changes to:
+
+```text
+main: leave
+owner: destroy frame
+local: destroy
+promise: destroy
+```
+
+There is no `body: last`, `return_void`, or `final_suspend` print. `destroy()` abandons the suspended body; it does not resume it to the end. It invokes cleanup for live objects. That is ordinary RAII applied to retained state.
+
+This is safe here because no queue or callback holds a handle. Once an external system can resume us, destroying the frame also requires removing or disabling those registrations. We will implement that in Lesson 10.
+
+## 4. Change initial suspension and predict the new trace
+
+Copy both files together so the local include still resolves:
+
+```bash
+cp labs/03/traced_job.hpp scratch/traced_job.hpp
+cp labs/03/01_finish.cpp scratch/lifecycle.cpp
+```
+
+In `scratch/traced_job.hpp`, change **only** `initial_suspend`'s return type from `std::suspend_always` to `std::suspend_never`. Compile `scratch/lifecycle.cpp` and run it.
+
+Expected difference: `local: construct` and `body: first` move before `main: resume 1`. The body now starts inside the call. The first explicit resume completes it; the second guarded resume does nothing. This is eager start. Lazy start delayed the body until the caller explicitly resumed it.
+
+Neither policy schedules work on another thread. The choice controls when user code starts relative to the call.
+
+Do not make the same change to `final_suspend` while retaining this owner. A non-suspending final await would destroy the frame before the owner tries to use or destroy its handle. That variant has a lifetime bug; a successful compile cannot validate it.
+
+## 5. Place results and exceptions on the same trace
+
+At a valueless `co_return`, `return_void()` runs, live body locals are destroyed, and the coroutine reaches final suspension. At `co_return value`, `return_value(value)` replaces `return_void()`.
+
+An exception escaping the body destroys affected locals and reaches `unhandled_exception()`. Our current promise terminates there. In Lesson 11, that method will store the exception, then allow final suspension and delivery to the consumer. Exceptions do not automatically appear at the original call site just because the function was called there.
+
+There is one important boundary: failures during allocation, parameter copying, promise construction, `get_return_object`, or entry into the initial await before its `await_resume()` begins propagate through the original invocation. Already-created state is cleaned up as required. Exceptions from initial `await_resume()` are handled through the coroutine's exception machinery. Our initial/final hooks are nonthrowing to keep the ownership protocol simple.
+
+If a custom `unhandled_exception()` itself throws, the language treats the coroutine as suspended at final suspend while that exception escapes. Our types avoid this policy: storing `exception_ptr` or terminating is easier to reason about.
+
+## 6. Use this trace to diagnose a stuck coroutine
+
+Draw the path from this experiment:
+
+```text
+call -> create state -> return object -> initial pause
+resume -> local constructed -> ordinary pause
+resume -> return_void -> local destroyed -> final pause
+owner dies -> promise destroyed -> parameter copies destroyed -> storage released
+```
+
+The owner uses the generated destroy operation. It does not call `delete` on a guessed frame layout. Storage allocation may be optimized away, but the lifetime behavior still has to be correct.
+
+**Your experiment:** put the `guard` in a nested scope that ends before the pause. Its destructor should move before control returns to `main` at the first pause. Then put it back and abandon the coroutine. Its destructor should run during owner destruction. Explain both results using scope, rather than whether a native stack is currently active.
+
+**Checkpoint:** given a trace ending at initial suspension, ordinary suspension, or final suspension, identify whether the body local exists and who still owns the frame. Never resume at final suspend; never destroy a running coroutine.
+
+```bash
+python3 tools/check_labs.py 03
+```
+
+Next: [Lesson 4 — Discover what survives suspension](04_coroutine_frame.md).
